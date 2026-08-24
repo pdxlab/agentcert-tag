@@ -1,0 +1,21 @@
+# Kong declarative config for the demo — native format, no proprietary DSL.
+# The agentcert-tag plugin runs in SHADOW mode: it verifies + logs every
+# request but blocks nothing. To see enforcement, set mode: enforce and add
+# e.g. block_on: ["REVOKED", "UNVERIFIED"].
+_format_version: "3.0"
+
+services:
+  - name: upstream-agent-api
+    url: http://httpbin.org
+    routes:
+      - name: agent-route
+        paths: ["/"]
+    plugins:
+      - name: agentcert-tag
+        config:
+          verify_url: "http://agentcert-tag-sidecar:8080/verify"
+          mode: "shadow"
+          credential_header: "X-AgentCert-Token"
+          cache_ttl: 300
+          fail_mode: "closed"
+          block_on: []

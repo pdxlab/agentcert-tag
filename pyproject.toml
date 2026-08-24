@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentcert-tag"
+version = "0.1.0"
+description = "TAG — embeddable AgentCert + TrustScore verification core for gateways and firewalls"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "TrustModel" }]
+dependencies = ["cryptography>=42"]
+
+[project.urls]
+Homepage = "https://trustmodel.ai"
+Source = "https://github.com/pdxlab/agentcert-tag"
+
+[tool.setuptools]
+package-dir = { "" = "core" }
+
+[tool.setuptools.packages.find]
+where = ["core"]

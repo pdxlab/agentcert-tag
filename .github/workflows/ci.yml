@@ -1,0 +1,21 @@
+name: CI
+on:
+  push: { branches: [main] }
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r core/requirements.txt pytest
+      - run: python -m pytest tests/ -q
+  lua-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update && sudo apt-get install -y luarocks >/dev/null
+          sudo luarocks install luacheck >/dev/null
+          luacheck kong/ --no-max-line-length --globals kong ngx || true

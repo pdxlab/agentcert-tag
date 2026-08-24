@@ -1,0 +1,59 @@
+# Full closed-loop demo on Kong (TRUS-1814 / impl-guide §8).
+#
+#   agent  ->  Kong (agentcert-tag plugin, SHADOW mode)  ->  httpbin upstream
+#                        |
+#                        v
+#                 TAG verify sidecar  ->  mock-trustmodel (CA + reputation + transparency)
+#
+# Bring up:   docker compose up --build
+# Then run:   ./demo_request.sh        (issues a cert via the mock CA, calls through Kong)
+#
+# The plugin defaults to SHADOW: it logs "VERIFIED / score" but blocks nothing.
+# Flip KONG plugin config mode=enforce + block_on to see it gate traffic.
+services:
+  mock-trustmodel:
+    build:
+      context: ..
+      dockerfile: demo/Dockerfile.mock
+    environment:
+      MOCK_PORT: "9000"
+      ANCHORS_OUT: "/shared/anchors.pem"
+    volumes:
+      - shared:/shared
+    ports: ["9000:9000"]
+
+  agentcert-tag-sidecar:
+    build:
+      context: ..
+      dockerfile: sidecar/Dockerfile
+    environment:
+      TAG_MODE: "shadow"
+      TAG_FAIL_MODE: "closed"
+      TAG_ANCHORS_PEM: "/shared/anchors.pem"
+      TRUSTMODEL_BASE_URL: "http://mock-trustmodel:9000"
+    volumes:
+      - shared:/shared
+    depends_on:
+      mock-trustmodel:
+        condition: service_started
+    ports: ["8080:8080"]
+
+  kong:
+    image: kong:3.7
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: "/kong/kong.yml"
+      KONG_PLUGINS: "bundled,agentcert-tag"
+      KONG_LUA_PACKAGE_PATH: "/opt/?.lua;;"
+      KONG_PROXY_LISTEN: "0.0.0.0:8000"
+      KONG_LOG_LEVEL: "notice"
+    volumes:
+      - ../kong/agentcert-tag:/opt/kong/plugins/agentcert-tag
+      - ./kong.yml:/kong/kong.yml
+    depends_on:
+      agentcert-tag-sidecar:
+        condition: service_started
+    ports: ["8000:8000"]
+
+volumes:
+  shared:
