@@ -17,7 +17,7 @@ from typing import Optional
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
+from cryptography.hazmat.primitives.asymmetric import ec, ed448, ed25519, padding, rsa
 from cryptography.exceptions import InvalidSignature
 
 from .models import (
@@ -214,6 +214,10 @@ class Verifier:
             elif isinstance(pub, rsa.RSAPublicKey):
                 pub.verify(cert.signature, cert.tbs_certificate_bytes,
                            padding.PKCS1v15(), cert.signature_hash_algorithm)
+            elif isinstance(pub, (ed25519.Ed25519PublicKey, ed448.Ed448PublicKey)):
+                # EdDSA — no hash algorithm arg. The TrustModel issuer default
+                # is Ed25519 (aurora-gateway CertIssuer.ALGO_ED25519).
+                pub.verify(cert.signature, cert.tbs_certificate_bytes)
             else:
                 return False
             return True

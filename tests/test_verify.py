@@ -30,7 +30,9 @@ def _sign(subject, subject_key, issuer_cert, issuer_key, ca, days, agent_uri=Non
     if score is not None:
         b = b.add_extension(x509.UnrecognizedExtension(
             x509.ObjectIdentifier(OID_TRUSTSCORE), json.dumps({"value": score}).encode()), False)
-    return b.sign(issuer_key, hashes.SHA256())
+    from cryptography.hazmat.primitives.asymmetric import ed25519, ed448
+    algo = None if isinstance(issuer_key, (ed25519.Ed25519PrivateKey, ed448.Ed448PrivateKey)) else hashes.SHA256()
+    return b.sign(issuer_key, algo)
 
 
 def _pki(days=90, agent="ans://acme/agent/prod", score=None, expired=False):
@@ -102,6 +104,22 @@ def test_claimed_id_mismatch():
     ts = InMemoryTrustSource(anchors); ts.set_score("ans://acme/agent/prod", 800)
     res = Verifier(ts).verify(_pem(leaf), claimed_agent_id="ans://someone/else/prod")
     assert res.verification_status == VerificationStatus.UNVERIFIED
+
+
+def test_verified_with_ed25519_issuer():
+    # The TrustModel issuer key defaults to Ed25519 (aurora-gateway
+    # CertIssuer.ALGO_ED25519); chain validation must handle EdDSA.
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+    rk = ed25519.Ed25519PrivateKey.generate()
+    root = _sign("Root", rk.public_key(), None, rk, True, 3650)
+    lk = ec.generate_private_key(ec.SECP256R1())
+    leaf = _sign("ans://acme/ed/prod", lk.public_key(), root, rk, False, 90,
+                 agent_uri="ans://acme/ed/prod", score=800)
+    anchors = [root.public_bytes(serialization.Encoding.PEM).decode()]
+    ts = InMemoryTrustSource(anchors); ts.set_score("ans://acme/ed/prod", 800)
+    res = Verifier(ts).verify(_pem(leaf))
+    assert res.verification_status == VerificationStatus.VERIFIED
+    assert res.trust_score.value == 800
 
 
 def test_attestation_signed():
