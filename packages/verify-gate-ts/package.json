@@ -1,0 +1,27 @@
+{
+  "name": "@trustmodel/agentcert-tag",
+  "version": "0.1.0",
+  "description": "Verify an AgentCert + TrustScore inside a TypeScript MCP server (shadow mode, opt-in, dependency-free).",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": ["mcp", "agentcert", "trustscore", "verification", "ai-agents", "trustmodel"],
+  "homepage": "https://trustmodel.ai/verify",
+  "repository": { "type": "git", "url": "https://github.com/pdxlab/agentcert-tag" },
+  "publishConfig": { "access": "public" },
+  "engines": { "node": ">=18" },
+  "devDependencies": { "typescript": "^5.4.0", "@types/node": "^20.0.0" }
+}
