@@ -83,7 +83,7 @@ def main():
     b1, sink1, r1 = deploy("sha-aaaa1111", score=812)
     print(f"  issued serial {r1.issued.serial_hex[:16]}...  for {b1.agent_uri}")
     print(f"  delivered secrets: {sorted(sink1.store.keys())}")
-    v1 = verifier.verify(sink1.store["AGENTCERT_LEAF_PEM"].encode())
+    v1 = verifier.verify(sink1.store["AGENTCERT_LEAF_PEM"].encode(), carriage="mtls")
     show(v1)
     assert v1.verification_status == VerificationStatus.VERIFIED, v1.detail
     assert v1.trust_score.value == 812
@@ -96,11 +96,11 @@ def main():
     # (TRUS-1813 must be <= the verifier's revocation_max_staleness, TRUS-1815).
     # Clearing the cache here simulates that propagation completing.
     verifier._revocation_cache._d.clear()
-    v_new = verifier.verify(sink2.store["AGENTCERT_LEAF_PEM"].encode())
+    v_new = verifier.verify(sink2.store["AGENTCERT_LEAF_PEM"].encode(), carriage="mtls")
     print(" -- new cert:")
     show(v_new)
     assert v_new.verification_status == VerificationStatus.VERIFIED
-    v_old = verifier.verify(sink1.store["AGENTCERT_LEAF_PEM"].encode())
+    v_old = verifier.verify(sink1.store["AGENTCERT_LEAF_PEM"].encode(), carriage="mtls")
     print(" -- old (superseded) cert:")
     show(v_old)
     assert v_old.verification_status == VerificationStatus.REVOKED, v_old.detail
@@ -110,7 +110,7 @@ def main():
     ca.revoke(r2.issued.serial_hex)
     # bypass the 5-min revocation cache to show immediate effect
     verifier._revocation_cache._d.clear()
-    v_rev = verifier.verify(sink2.store["AGENTCERT_LEAF_PEM"].encode())
+    v_rev = verifier.verify(sink2.store["AGENTCERT_LEAF_PEM"].encode(), carriage="mtls")
     show(v_rev)
     assert v_rev.verification_status == VerificationStatus.REVOKED
 
@@ -118,7 +118,7 @@ def main():
     hr("4. Forged cert (attacker's own CA)  ->  UNVERIFIED")
     rogue = LocalDemoCA()
     rb, rsink, _ = _deploy_with(rogue, "rogue", 999)
-    v_forge = verifier.verify(rsink.store["AGENTCERT_LEAF_PEM"].encode())
+    v_forge = verifier.verify(rsink.store["AGENTCERT_LEAF_PEM"].encode(), carriage="mtls")
     show(v_forge)
     assert v_forge.verification_status == VerificationStatus.UNVERIFIED
 

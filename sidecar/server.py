@@ -103,7 +103,14 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 pem = base64.b64decode(cred)
             claimed = payload.get("claimed_agent_id")
-            result = VERIFIER.verify(pem, claimed_agent_id=claimed)
+            # carriage="mtls" (TLS proved possession) skips the stapled assertion;
+            # otherwise a header-carried public cert must ship a proof-of-possession.
+            result = VERIFIER.verify(
+                pem, claimed_agent_id=claimed,
+                carriage=payload.get("carriage", "header"),
+                proof=payload.get("proof"),
+                audience=payload.get("audience"),
+            )
             # detail is metadata-only (no PHI/PII) and powers shadow-mode logs.
             self._send(200, result.to_dict(include_detail=True))
         except Exception as exc:  # never 500 the gateway's dependency

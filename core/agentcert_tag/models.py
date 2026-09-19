@@ -44,6 +44,10 @@ class TrustScore:
     tier: TrustTier = TrustTier.UNKNOWN
     last_updated: Optional[str] = None      # ISO-8601
     score_age_seconds: Optional[int] = None
+    # Provenance of the score so policy can weight it: a fresh backend read
+    # ("live") is authoritative; the cert-baked fallback ("cert_baked") is frozen
+    # at issuance and may be stale — never treat it as a live posture.
+    source: str = "none"                    # live | cert_baked | none
 
     def to_dict(self) -> dict:
         return {
@@ -51,6 +55,7 @@ class TrustScore:
             "tier": self.tier.value,
             "last_updated": self.last_updated,
             "score_age_seconds": self.score_age_seconds,
+            "source": self.source,
         }
 
 

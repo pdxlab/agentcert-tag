@@ -11,6 +11,7 @@ any re-implementation (e.g. pure Lua) must produce the same VerificationResult.
 from __future__ import annotations
 
 import base64
+import json
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -36,6 +37,12 @@ from .trust import Reputation, TrustSource
 # agent keeps verifying during the gap. Documented in the threat model (1824).
 DEFAULT_REVOCATION_MAX_STALENESS_S = 300
 DEFAULT_SCORE_TTL_S = 300  # FR-9 default 5 min
+DEFAULT_POP_MAX_AGE_S = 300  # reject stapled assertions older than this (replay window)
+
+
+class Carriage:
+    MTLS = "mtls"      # possession proven by the TLS handshake — no assertion needed
+    HEADER = "header"  # cert carried in a header: a stapled PoP assertion is REQUIRED
 
 
 class FailMode:
@@ -92,10 +99,18 @@ class Verifier:
 
     # ---- public API -----------------------------------------------------
 
-    def verify(self, cert_pem: bytes, claimed_agent_id: Optional[str] = None) -> VerificationResult:
+    def verify(self, cert_pem: bytes, claimed_agent_id: Optional[str] = None, *,
+               carriage: str = Carriage.HEADER, proof: Optional[dict] = None,
+               audience: Optional[str] = None) -> VerificationResult:
         """Verify a presented X.509 AgentCert. Never raises — a malformed or
         missing credential yields UNVERIFIED so the request pipeline is never
-        crashed (FR-3)."""
+        crashed (FR-3).
+
+        ``carriage`` says how the cert reached us. On ``mtls`` the TLS handshake
+        already proved the presenter holds the leaf key. On ``header`` (the
+        default — the only safe assumption for an untrusted caller) the cert is a
+        public object, so a stapled proof-of-possession ``proof`` (see ``pop.py``)
+        is REQUIRED; without a valid one the result is UNVERIFIED (fail closed)."""
         now_iso = datetime.now(timezone.utc).isoformat()
         try:
             leaf = x509.load_pem_x509_certificate(cert_pem)
@@ -128,14 +143,28 @@ class Verifier:
                 attestation=Attestation(self.verifier_id, verified_at=now_iso),
             ))
 
-        # FR-7 subject/identity match
-        if claimed_agent_id and agent_id and claimed_agent_id != agent_id:
+        # FR-7 subject/identity match. Fail closed when a claim is made but the
+        # cert carries no verifiable identity (agent_id is None) — otherwise a
+        # cert with no ans:// SAN would let a caller assert any id uncontested.
+        if claimed_agent_id and claimed_agent_id != agent_id:
             return self._sign(VerificationResult(
                 VerificationStatus.UNVERIFIED, agent_id=agent_id, cert_valid=True,
                 cert_expiry=not_after.isoformat(),
                 detail=f"claimed id {claimed_agent_id!r} != cert id {agent_id!r}",
                 attestation=Attestation(self.verifier_id, verified_at=now_iso),
             ))
+
+        # Proof-of-possession: a header-carried cert is public, so require a
+        # stapled assertion signed by the leaf key. mTLS already proved it.
+        if carriage != Carriage.MTLS:
+            pop_ok, pop_detail = self._verify_pop(leaf, agent_id, proof, audience)
+            if not pop_ok:
+                return self._sign(VerificationResult(
+                    VerificationStatus.UNVERIFIED, agent_id=agent_id, cert_valid=True,
+                    cert_expiry=not_after.isoformat(),
+                    detail=f"proof-of-possession failed: {pop_detail}",
+                    attestation=Attestation(self.verifier_id, verified_at=now_iso),
+                ))
 
         # FR-6 revocation (cached CRL/transparency, offline-tolerant)
         serial_hex = format(leaf.serial_number, "x")
@@ -171,22 +200,59 @@ class Verifier:
 
     # ---- internals ------------------------------------------------------
 
+    @staticmethod
+    def _valid_ans_uri(s: Optional[str]) -> bool:
+        """A well-formed ans:// identity: correct scheme, non-empty authority, no
+        whitespace/control chars, bounded length. Anything else is not a
+        trustworthy identity and must not drive a trust decision."""
+        prefix = ANS_URI_SCHEME + "://"
+        if not s or not s.startswith(prefix) or len(s) > 512:
+            return False
+        if len(s) <= len(prefix):
+            return False
+        return all(ord(c) > 32 and c != "\x7f" for c in s)
+
     def _agent_id(self, leaf: x509.Certificate) -> Optional[str]:
-        """Prefer the ans: URI-SAN identity; fall back to the subject CN."""
+        """The agent identity is the ans:// URI-SAN. We only trust a validated
+        ans:// value (SAN preferred; CN accepted only if it is itself a valid
+        ans:// URI) — never an arbitrary CN string as an identity."""
         try:
             san = leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
             for uri in san.get_values_for_type(x509.UniformResourceIdentifier):
-                if uri.startswith(ANS_URI_SCHEME + ":"):
+                if self._valid_ans_uri(uri):
                     return uri
         except x509.ExtensionNotFound:
             pass
         cn = leaf.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)
-        return cn[0].value if cn else None
+        cn_val = cn[0].value if cn else None
+        return cn_val if self._valid_ans_uri(cn_val) else None
+
+    @staticmethod
+    def _is_ca(cert: x509.Certificate) -> bool:
+        try:
+            return bool(cert.extensions.get_extension_for_class(
+                x509.BasicConstraints).value.ca)
+        except x509.ExtensionNotFound:
+            return False
+
+    @staticmethod
+    def _can_sign_certs(cert: x509.Certificate) -> bool:
+        """KeyUsage.keyCertSign must be set when a KeyUsage extension is present.
+        Absence is permitted (RFC 5280 leaves KeyUsage optional); present-but-
+        without-the-bit is a hard reject."""
+        try:
+            return bool(cert.extensions.get_extension_for_class(
+                x509.KeyUsage).value.key_cert_sign)
+        except x509.ExtensionNotFound:
+            return True
 
     def _validate_chain(self, leaf: x509.Certificate) -> bool:
         """Manual path build: leaf -> issuing -> root anchor. We validate
-        signatures and CA basic-constraints rather than leaning on a policy
-        API, so the same logic ports cleanly to other runtimes (NFR-5)."""
+        signatures AND CA basic-constraints / key-usage on every issuing link, so
+        a non-CA (or keyCertSign-less) cert can never mint or vouch for a leaf,
+        and the same logic ports cleanly to other runtimes (NFR-5)."""
+        if self._is_ca(leaf):          # a leaf must not itself be a CA cert
+            return False
         anchors_by_subject: dict[bytes, x509.Certificate] = {
             a.subject.public_bytes(): a for a in self._anchors
         }
@@ -196,6 +262,8 @@ class Verifier:
             if issuer is None:
                 # Self-issued leaf pointing straight at an anchor subject we hold?
                 return False
+            if not self._is_ca(issuer) or not self._can_sign_certs(issuer):
+                return False       # issuer must be a cert-signing CA
             if not self._signed_by(cur, issuer):
                 return False
             if issuer.subject == issuer.issuer and issuer in self._anchors:
@@ -218,6 +286,52 @@ class Verifier:
                 # EdDSA — no hash algorithm arg. The TrustModel issuer default
                 # is Ed25519 (aurora-gateway CertIssuer.ALGO_ED25519).
                 pub.verify(cert.signature, cert.tbs_certificate_bytes)
+            else:
+                return False
+            return True
+        except InvalidSignature:
+            return False
+        except Exception:
+            return False
+
+    def _verify_pop(self, leaf: x509.Certificate, agent_id: Optional[str],
+                    proof: Optional[dict], audience: Optional[str]) -> tuple[bool, str]:
+        """Verify a stapled proof-of-possession: the presenter signed a fresh,
+        identity-bound assertion with the leaf private key (see pop.py). Only the
+        real key-holder can produce it, which defeats public-cert replay."""
+        if not isinstance(proof, dict) or "payload" not in proof or "sig" not in proof:
+            return False, "missing stapled assertion (header carriage requires proof-of-possession)"
+        try:
+            raw = proof["payload"]
+            payload = base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
+            sig = base64.b64decode(proof["sig"])
+            claims = json.loads(payload.decode())
+        except Exception as exc:
+            return False, f"malformed proof: {exc}"
+        now = time.time()
+        exp, iat = claims.get("exp"), claims.get("iat")
+        if not isinstance(exp, (int, float)) or now > exp:
+            return False, "proof expired"
+        if not isinstance(iat, (int, float)) or (now - iat) > DEFAULT_POP_MAX_AGE_S:
+            return False, "proof outside freshness window"
+        if audience is not None and claims.get("aud") != audience:
+            return False, "proof audience mismatch"
+        if not agent_id or claims.get("sub") != agent_id:
+            return False, "proof subject does not match cert identity"
+        if not self._raw_verify(leaf.public_key(), sig, payload):
+            return False, "proof signature invalid — presenter does not hold the leaf key"
+        return True, "ok"
+
+    @staticmethod
+    def _raw_verify(pub, signature: bytes, message: bytes) -> bool:
+        """Verify a raw signature over ``message`` by the leaf's public key."""
+        try:
+            if isinstance(pub, ec.EllipticCurvePublicKey):
+                pub.verify(signature, message, ec.ECDSA(hashes.SHA256()))
+            elif isinstance(pub, rsa.RSAPublicKey):
+                pub.verify(signature, message, padding.PKCS1v15(), hashes.SHA256())
+            elif isinstance(pub, (ed25519.Ed25519PublicKey, ed448.Ed448PublicKey)):
+                pub.verify(signature, message)
             else:
                 return False
             return True
@@ -252,16 +366,21 @@ class Verifier:
             except Exception:
                 rep = None
         if rep is None or rep.value is None:
-            # Offline fallback: score baked into the cert at issuance time.
+            # Offline fallback: score baked into the cert at issuance time. It is
+            # frozen and may be stale, so stamp its provenance + a synthetic age
+            # (from the cert's notBefore) and never present it as a live posture.
             baked = self._score_from_cert(leaf)
             if baked is None:
                 unknown = True
-                return TrustScore(tier=TrustTier.UNKNOWN), cache_hit, unknown
+                return TrustScore(tier=TrustTier.UNKNOWN, source="none"), cache_hit, unknown
+            baked_age = max(0, int(time.time() - leaf.not_valid_before_utc.timestamp()))
             return TrustScore(value=baked, tier=TrustTier.from_score(baked),
-                              last_updated=None, score_age_seconds=None), cache_hit, unknown
+                              last_updated=leaf.not_valid_before_utc.isoformat(),
+                              score_age_seconds=baked_age, source="cert_baked"), cache_hit, unknown
         age = int(time.time() - rep.fetched_at)
         return (TrustScore(value=rep.value, tier=TrustTier.from_score(rep.value),
-                           last_updated=rep.last_updated, score_age_seconds=age),
+                           last_updated=rep.last_updated, score_age_seconds=age,
+                           source="live"),
                 cache_hit, unknown)
 
     @staticmethod
