@@ -23,18 +23,25 @@ Environment:
 """
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
 import urllib.request
 from typing import Awaitable, Callable, Iterable, Mapping, Optional
 
-__version__ = "0.1.0"
-__all__ = ["verify_gate", "verify", "extract_token", "VerificationResult", "VerifyError"]
+__version__ = "0.2.0"
+__all__ = ["verify_gate", "verify", "extract_token", "extract_proof",
+           "VerificationResult", "VerifyError"]
 
 log = logging.getLogger("agentcert-tag")
 
 DEFAULT_HEADER = "x-agentcert-token"
+# A presented cert is public, so on a non-mTLS carriage the caller must also ship
+# a proof-of-possession (a leaf-signed stapled assertion) in this header; we
+# forward it to the verify endpoint, which rejects a bare cert without it.
+PROOF_HEADER = "x-agentcert-proof"
+CARRIAGE_HEADER = "x-agentcert-carriage"
 DEFAULT_VERIFY_URL = "http://localhost:8080/verify"
 DEFAULT_BLOCK_ON = ("REVOKED", "UNVERIFIED")
 
@@ -68,15 +75,19 @@ def _enabled() -> bool:
     return os.environ.get("TRUSTMODEL_VERIFY") == "1"
 
 
-def verify(token: Optional[str], *, verify_url: Optional[str] = None, timeout: float = 3.0) -> VerificationResult:
-    """POST the presented credential to the TAG verify endpoint and return its result.
-    Never raises on transport error — returns an ERROR result so the caller's fail
-    policy decides."""
+def verify(token: Optional[str], *, proof: Optional[dict] = None, carriage: str = "header",
+           verify_url: Optional[str] = None, timeout: float = 3.0) -> VerificationResult:
+    """POST the presented credential (+ proof-of-possession) to the TAG verify
+    endpoint and return its result. Never raises on transport error — returns an
+    ERROR result so the caller's fail policy decides."""
     url = verify_url or os.environ.get("TRUSTMODEL_VERIFY_URL", DEFAULT_VERIFY_URL)
     if not token:
         return VerificationResult(verification_status="UNVERIFIED", cert_valid=False,
                                   detail="no credential presented")
-    body = json.dumps({"credential": token}).encode()
+    payload: dict = {"credential": token, "carriage": carriage}
+    if proof is not None:
+        payload["proof"] = proof
+    body = json.dumps(payload).encode()
     req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -85,14 +96,32 @@ def verify(token: Optional[str], *, verify_url: Optional[str] = None, timeout: f
         return VerificationResult(verification_status="ERROR", detail=f"verify unreachable: {exc}")
 
 
-def extract_token(headers: Optional[Mapping[str, str]], header: str = DEFAULT_HEADER) -> Optional[str]:
-    """Case-insensitive lookup of the AgentCert credential header."""
+def _header(headers: Optional[Mapping[str, str]], name: str) -> Optional[str]:
     if not headers:
         return None
     for k, v in headers.items():
-        if k.lower() == header.lower():
-            return v
+        if k.lower() == name.lower():
+            return v[0] if isinstance(v, (list, tuple)) else v
     return None
+
+
+def extract_token(headers: Optional[Mapping[str, str]], header: str = DEFAULT_HEADER) -> Optional[str]:
+    """Case-insensitive lookup of the AgentCert credential header."""
+    return _header(headers, header)
+
+
+def extract_proof(headers: Optional[Mapping[str, str]], header: str = PROOF_HEADER) -> Optional[dict]:
+    """Decode the stapled proof-of-possession header (base64url JSON of
+    ``{payload, sig}``). Returns None when absent/malformed."""
+    raw = _header(headers, header)
+    if not raw:
+        return None
+    try:
+        decoded = base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
+        obj = json.loads(decoded.decode())
+        return obj if isinstance(obj, dict) else None
+    except Exception:  # noqa: BLE001 - a malformed proof is simply "no proof"
+        return None
 
 
 def verify_gate(
@@ -113,10 +142,11 @@ def verify_gate(
     effective_mode = "enforce" if os.environ.get("TRUSTMODEL_MODE") == "enforce" else mode
     block = set(block_on)
 
-    async def guard(token: Optional[str]) -> VerificationResult:
+    async def guard(token: Optional[str], *, proof: Optional[dict] = None,
+                    carriage: str = "header") -> VerificationResult:
         if not _enabled():
             return VerificationResult(verification_status="DISABLED")
-        result = verify(token, verify_url=verify_url)
+        result = verify(token, proof=proof, carriage=carriage, verify_url=verify_url)
         log.info("[agentcert-tag] mode=%s status=%s score=%s tier=%s",
                  effective_mode, result.status, result.score, result.tier)
         if on_result:

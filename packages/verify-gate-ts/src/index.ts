@@ -37,8 +37,18 @@ export interface VerifyGateOptions {
 }
 
 const DEFAULT_HEADER = "x-agentcert-token";
+// A presented cert is public, so on a non-mTLS carriage the caller must also ship
+// a proof-of-possession (a leaf-signed stapled assertion) in this header; we
+// forward it to the verify endpoint, which rejects a bare cert without it.
+const PROOF_HEADER = "x-agentcert-proof";
 const DEFAULT_URL = "http://localhost:8080/verify";
 const DEFAULT_BLOCK: Verdict[] = ["REVOKED", "UNVERIFIED"];
+
+/** A stapled proof-of-possession: `{payload, sig}`, both base64. */
+export interface Proof {
+  payload: string;
+  sig: string;
+}
 
 export class VerifyError extends Error {
   result: VerificationResult;
@@ -68,18 +78,43 @@ export function extractToken(
   return undefined;
 }
 
-/** POST the credential to the TAG verify endpoint. Never throws — transport failures
- * become an ERROR verdict so the caller's fail policy decides. */
-export async function verify(token: string | undefined, verifyUrl?: string): Promise<VerificationResult> {
+/** Decode the stapled proof-of-possession header (base64url JSON of `{payload, sig}`).
+ * Returns undefined when absent/malformed. */
+export function extractProof(
+  headers: Record<string, string | string[] | undefined> | undefined,
+  header: string = PROOF_HEADER
+): Proof | undefined {
+  const raw = extractToken(headers, header);
+  if (!raw) return undefined;
+  try {
+    const b64 = raw.replace(/-/g, "+").replace(/_/g, "/");
+    const json = Buffer.from(b64, "base64").toString("utf8");
+    const obj = JSON.parse(json);
+    return obj && typeof obj === "object" ? (obj as Proof) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** POST the credential (+ proof-of-possession) to the TAG verify endpoint. Never
+ * throws — transport failures become an ERROR verdict so the caller's fail policy
+ * decides. */
+export async function verify(
+  token: string | undefined,
+  verifyUrl?: string,
+  opts?: { proof?: Proof; carriage?: "mtls" | "header" }
+): Promise<VerificationResult> {
   const url = verifyUrl ?? process.env.TRUSTMODEL_VERIFY_URL ?? DEFAULT_URL;
   if (!token) {
     return { verification_status: "UNVERIFIED", cert_valid: false, detail: "no credential presented" };
   }
+  const payload: Record<string, unknown> = { credential: token, carriage: opts?.carriage ?? "header" };
+  if (opts?.proof) payload.proof = opts.proof;
   try {
     const res = await fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ credential: token }),
+      body: JSON.stringify(payload),
     });
     if (!res.ok) return { verification_status: "ERROR", detail: `verify HTTP ${res.status}` };
     return (await res.json()) as VerificationResult;
@@ -93,14 +128,19 @@ export async function verify(token: string | undefined, verifyUrl?: string): Pro
  * - No-op unless TRUSTMODEL_VERIFY=1.
  * - shadow: logs, resolves. enforce: rejects with VerifyError on a blocked verdict.
  */
-export function verifyGate(opts: VerifyGateOptions = {}): (token: string | undefined) => Promise<VerificationResult> {
+export function verifyGate(
+  opts: VerifyGateOptions = {}
+): (token: string | undefined, guardOpts?: { proof?: Proof; carriage?: "mtls" | "header" }) => Promise<VerificationResult> {
   const mode = process.env.TRUSTMODEL_MODE === "enforce" ? "enforce" : opts.mode ?? "shadow";
   const block = new Set<Verdict>(opts.blockOn ?? DEFAULT_BLOCK);
   const failMode = opts.failMode ?? "closed";
 
-  return async (token: string | undefined): Promise<VerificationResult> => {
+  return async (
+    token: string | undefined,
+    guardOpts?: { proof?: Proof; carriage?: "mtls" | "header" }
+  ): Promise<VerificationResult> => {
     if (!enabled()) return { verification_status: "DISABLED" };
-    const result = await verify(token, opts.verifyUrl);
+    const result = await verify(token, opts.verifyUrl, guardOpts);
     // eslint-disable-next-line no-console
     console.error(
       `[agentcert-tag] mode=${mode} status=${result.verification_status} ` +
