@@ -1,0 +1,37 @@
+name: publish-pypi
+
+# Publishes trustmodel-agentcert-tag to PyPI via Trusted Publishing (OIDC) —
+# no API token. Fires on a GitHub Release; matched by the PyPI pending publisher
+# (owner: pdxlab, repo: agentcert-tag, workflow: publish-pypi.yml, environment: pypi).
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # required for OIDC Trusted Publishing
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build packages/verify-gate-py
+
+      - name: Publish to PyPI (Trusted Publishing)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: packages/verify-gate-py/dist/
+          print-hash: true
