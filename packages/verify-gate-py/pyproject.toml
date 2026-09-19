@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trustmodel-agentcert-tag"
-version = "0.1.0"
+version = "0.2.0"
 description = "Verify an AgentCert + TrustScore inside a Python MCP server (shadow mode, opt-in, dependency-free)."
 readme = "README.md"
 license = { text = "MIT" }

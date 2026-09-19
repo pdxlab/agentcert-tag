@@ -31,3 +31,7 @@ The gate never reads request payloads (metadata only) and never makes the allow/
 decision on its own — it returns a structured verdict (`VERIFIED` / `REVOKED` /
 `UNVERIFIED` / `ERROR`) your server acts on. MIT licensed. Part of
 [pdxlab/agentcert-tag](https://github.com/pdxlab/agentcert-tag).
+
+## Proof-of-possession (enforce mode)
+
+A presented AgentCert is public, so on a non-mTLS carriage the caller must also send a stapled proof-of-possession (a leaf-signed assertion) in the `X-AgentCert-Proof` header. The gate extracts it (`extract_proof` / `extractProof`) and forwards it with the credential; the verify endpoint rejects a bare cert without it. On mTLS, pass `carriage: "mtls"` — the handshake already proves possession.

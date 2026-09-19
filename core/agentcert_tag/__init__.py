@@ -10,12 +10,14 @@ from .models import (
     VerificationResult,
     VerificationStatus,
 )
+from .pop import build_assertion
 from .trust import HttpTrustSource, InMemoryTrustSource, Reputation, TrustSource
-from .verify import DEFAULT_REVOCATION_MAX_STALENESS_S, FailMode, Mode, Verifier
+from .verify import Carriage, DEFAULT_REVOCATION_MAX_STALENESS_S, FailMode, Mode, Verifier
 
 __version__ = "0.1.0"
 __all__ = [
-    "Verifier", "Mode", "FailMode", "DEFAULT_REVOCATION_MAX_STALENESS_S",
+    "Verifier", "Mode", "FailMode", "Carriage", "DEFAULT_REVOCATION_MAX_STALENESS_S",
     "TrustSource", "HttpTrustSource", "InMemoryTrustSource", "Reputation",
     "VerificationResult", "VerificationStatus", "TrustScore", "TrustTier", "Attestation",
+    "build_assertion",
 ]
