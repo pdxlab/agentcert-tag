@@ -1,0 +1,50 @@
+# Argus config — agentcert-tag (TAG verifier: Python core + TS/Lua wrappers).
+# Vendored from karlmehta/argus. This repo is a security boundary — the verifier
+# decides whether a calling agent's AgentCert + TrustScore is trusted — so the
+# crypto/verification core gets one severity higher.
+
+version: 1
+
+skills:
+  - security
+  - data-protection
+  - correctness
+  - concurrency
+  - performance
+  - api-compat
+  - tests
+  - dependencies
+
+gate: major
+
+verdict:
+  # agentcert-tag has no branch-protection "approving review" gate to satisfy, so
+  # Argus reviews and requests changes but never submits an APPROVE.
+  allow_approve: false
+  never_approve_authors:
+    - "dependabot[bot]"
+    - "renovate[bot]"
+    - "argus[bot]"
+
+paths:
+  skip:
+    - "**/*.lock"
+    - "**/dist/**"
+    - "**/node_modules/**"
+    - "**/*.d.ts"
+    - "**/*.egg-info/**"
+  # The trust boundary. Extra scrutiny — a bypass here is an auth bypass.
+  strict:
+    - "core/agentcert_tag/verify.py"
+    - "core/agentcert_tag/pop.py"
+    - "core/agentcert_tag/trust.py"
+    - "core/agentcert_tag/oids.py"
+    - "kong/**"
+    - "sidecar/**"
+    - "packages/**"
+
+limits:
+  max_inline_comments: 15
+  max_diff_lines: 4000
+
+model: ""
