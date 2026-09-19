@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trustmodel-agentcert-tag"
+version = "0.1.0"
+description = "Verify an AgentCert + TrustScore inside a Python MCP server (shadow mode, opt-in, dependency-free)."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+authors = [{ name = "TrustModel.ai" }]
+keywords = ["mcp", "agentcert", "trustscore", "verification", "ai-agents", "trustmodel"]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Intended Audience :: Developers",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://trustmodel.ai/verify"
+Documentation = "https://trustmodel.ai/wiki/agentcert/verify-gateway"
+Source = "https://github.com/pdxlab/agentcert-tag"
+
+[tool.setuptools]
+packages = ["trustmodel_agentcert_tag"]
