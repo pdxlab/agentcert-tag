@@ -1,16 +1,19 @@
 """MCP Trust Proxy (TRUS-2032) — a trust-first proxy in front of MCP servers.
 
-Sits between agents and one or more upstream MCP servers and enforces trust in
-BOTH directions, reusing the agentcert_tag verify core:
+Put it in front of any MCP server with **zero changes to the server**: point your
+agent at the proxy, the proxy forwards to the upstream, and enforces trust in both
+directions using the agentcert_tag verify core.
 
-  • inbound  (TRUS-2034): verify the CALLING agent's AgentCert + TrustScore on every
-    tools/call (proof-of-possession on the header carriage). shadow → log; enforce → block.
-  • outbound (TRUS-2035): gate on the UPSTREAM server's TrustScore vs a threshold.
-  • rug-pull (TRUS-2036): pin each server's tool definitions and flag drift.
+  • inbound  (TRUS-2034): verify the calling agent's AgentCert + TrustScore on tools/call
+  • outbound (TRUS-2035/2038): gate on the upstream server's TrustScore (config or Trust Index)
+  • rug-pull (TRUS-2036): pin each server's tool definitions and flag drift
+  • guardrails (TRUS-2037): deny patterns on tool arguments (PII / secrets / injection)
+  • routing  (TRUS-2033): many upstreams behind one endpoint, by path prefix
+  • streamable-HTTP: JSON and SSE responses, session lifecycle (GET/POST/DELETE)
+  • observability (TRUS-2041): /healthz /stats /metrics + structured JSON verdict logs
 
-Shadow by default (decides + logs, blocks nothing). Stdlib-only HTTP so the
-container stays tiny. The decision logic below is factored into pure functions so
-it is unit-testable without a live upstream.
+Shadow by default (decide + log, block nothing); enforce blocks with a JSON-RPC error.
+Stdlib-only. Config via a JSON file (MCP_PROXY_CONFIG) or env for the single-upstream case.
 """
 
 from __future__ import annotations
@@ -20,7 +23,10 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sys
+import threading
+import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -29,18 +35,72 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "core"))
 from agentcert_tag import VerificationStatus  # noqa: E402
 
 log = logging.getLogger("mcp-trust-proxy")
-
-# Verdicts that block a tool call in enforce mode.
 DEFAULT_BLOCK_ON = frozenset({"UNVERIFIED", "REVOKED", "EXPIRED"})
 
 
-# --------------------------------------------------------------------------- #
-#  Rug-pull detection — pin tool definitions, flag drift (TRUS-2036)          #
-# --------------------------------------------------------------------------- #
-class ToolPins:
-    """Pins the tool schema a server advertised and reports drift on the next
-    listing. A silent change to an approved tool (a "rug pull") is the signal."""
+# ═══════════════════════════════════════════════════════════════════════════
+#  Config + routing (TRUS-2033)
+# ═══════════════════════════════════════════════════════════════════════════
+class Upstream:
+    def __init__(self, d: dict):
+        self.path = d.get("path", "/")
+        self.url = d["url"]
+        self.min_score = int(d.get("min_score", 0))
+        self.server_score = d.get("server_score")           # static score, or None
+        self.ans_name = d.get("ans_name")                    # for Trust Index lookup
 
+
+class Config:
+    def __init__(self, raw: dict):
+        self.mode = raw.get("mode", os.environ.get("TAG_MODE", "shadow"))
+        self.fail_mode = raw.get("fail_mode", os.environ.get("TAG_FAIL_MODE", "closed"))
+        self.port = int(raw.get("listen_port", os.environ.get("MCP_PROXY_PORT", "8081")))
+        self.trust_index_url = raw.get("trust_index_url") or os.environ.get("MCP_PROXY_TRUST_INDEX_URL")
+        self.upstreams = [Upstream(u) for u in raw.get("upstreams", [])]
+        if not self.upstreams and os.environ.get("MCP_PROXY_UPSTREAM"):
+            self.upstreams = [Upstream({
+                "path": "/", "url": os.environ["MCP_PROXY_UPSTREAM"],
+                "min_score": int(os.environ.get("MCP_PROXY_MIN_SERVER_SCORE", "0")),
+                "server_score": (int(os.environ["MCP_PROXY_SERVER_SCORE"])
+                                 if os.environ.get("MCP_PROXY_SERVER_SCORE") else None),
+            })]
+        self.guardrails = [Guardrail(g) for g in raw.get("guardrails", [])]
+
+    @classmethod
+    def load(cls) -> "Config":
+        path = os.environ.get("MCP_PROXY_CONFIG")
+        raw = json.load(open(path)) if path and os.path.exists(path) else {}
+        return cls(raw)
+
+    def route(self, path: str) -> Upstream | None:
+        # longest matching path prefix wins
+        best = None
+        for u in self.upstreams:
+            if path.startswith(u.path) and (best is None or len(u.path) > len(best.path)):
+                best = u
+        return best
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Guardrails (TRUS-2037) — deny patterns on tool arguments
+# ═══════════════════════════════════════════════════════════════════════════
+class Guardrail:
+    def __init__(self, d: dict):
+        self.name = d.get("name", "guardrail")
+        self.pattern = re.compile(d["deny_pattern"])
+        self.action = d.get("action", "block")   # block | flag
+
+
+def guardrail_scan(guardrails, params: dict) -> list[str]:
+    """Return the names of guardrails whose deny-pattern matched the tool arguments."""
+    blob = json.dumps(params.get("arguments", params), ensure_ascii=False)
+    return [g.name for g in guardrails if g.pattern.search(blob)]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Rug-pull detection (TRUS-2036)
+# ═══════════════════════════════════════════════════════════════════════════
+class ToolPins:
     def __init__(self) -> None:
         self._pins: dict[str, dict[str, str]] = {}
 
@@ -50,120 +110,160 @@ class ToolPins:
 
     def diff(self, server: str, tools: list) -> list[str]:
         cur = {t.get("name", "?"): self._hash(t) for t in tools if isinstance(t, dict)}
-        prev = self._pins.get(server)
-        drift: list[str] = []
+        prev, drift = self._pins.get(server), []
         if prev is not None:
-            for name, h in cur.items():
-                if name not in prev:
-                    drift.append(f"added:{name}")
-                elif prev[name] != h:
-                    drift.append(f"changed:{name}")
-            for name in prev:
-                if name not in cur:
-                    drift.append(f"removed:{name}")
+            for n, h in cur.items():
+                drift.append(f"added:{n}" if n not in prev else (f"changed:{n}" if prev[n] != h else None))
+            drift += [f"removed:{n}" for n in prev if n not in cur]
         self._pins[server] = cur
-        return drift
+        return [d for d in drift if d]
 
 
-# --------------------------------------------------------------------------- #
-#  Pure decision functions (unit-testable)                                    #
-# --------------------------------------------------------------------------- #
+# ═══════════════════════════════════════════════════════════════════════════
+#  Discovery / server-trust (TRUS-2035 / 2038)
+# ═══════════════════════════════════════════════════════════════════════════
+class TrustIndex:
+    """Resolves an upstream server's TrustScore. Config score first; else the public
+    Trust Index API (agent_corpus); cached. Returns None if unknown."""
+
+    def __init__(self, base_url: str | None):
+        self.base = base_url.rstrip("/") if base_url else None
+        self._cache: dict[str, tuple[float, int | None]] = {}
+        self._ttl = 300
+
+    def score(self, up: Upstream) -> int | None:
+        if up.server_score is not None:
+            return up.server_score
+        if not (self.base and up.ans_name):
+            return None
+        hit = self._cache.get(up.ans_name)
+        if hit and time.time() - hit[0] < self._ttl:
+            return hit[1]
+        val = None
+        try:
+            req = urllib.request.Request(f"{self.base}/v1/ans/{up.ans_name}")
+            with urllib.request.urlopen(req, timeout=3) as r:
+                val = (json.loads(r.read()).get("trust_score") or {}).get("value")
+        except Exception:  # noqa: BLE001 - unknown score, gate decides
+            val = None
+        self._cache[up.ans_name] = (time.time(), val)
+        return val
+
+
+def server_trust_decision(score, *, min_score: int, mode: str):
+    if min_score <= 0:
+        return True, None
+    ok = score is not None and score >= min_score
+    return (True, None) if ok else ((mode != "enforce"), f"upstream server score {score} < required {min_score}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Inbound verify (TRUS-2034)
+# ═══════════════════════════════════════════════════════════════════════════
 def extract_cert_pem(headers) -> bytes | None:
-    """Pull the AgentCert leaf PEM from the request headers (raw PEM or base64)."""
-    val = None
     for k in headers:
         if k.lower() == "x-agentcert-token":
-            val = headers[k]
-            break
-    if not val:
-        return None
-    if "BEGIN CERTIFICATE" in val:
-        return val.encode()
+            v = headers[k]
+            return v.encode() if "BEGIN CERTIFICATE" in v else _b64(v)
+    return None
+
+
+def _b64(v):
     try:
-        return base64.b64decode(val)
+        return base64.b64decode(v)
     except Exception:  # noqa: BLE001
         return None
 
 
-def _extract_proof(headers) -> dict | None:
+def _header(headers, name, default=None):
     for k in headers:
-        if k.lower() == "x-agentcert-proof":
-            try:
-                raw = headers[k]
-                return json.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)).decode())
-            except Exception:  # noqa: BLE001
-                return None
-    return None
-
-
-def _carriage(headers) -> str:
-    for k in headers:
-        if k.lower() == "x-agentcert-carriage":
+        if k.lower() == name:
             return headers[k]
-    return "header"
+    return default
+
+
+def _proof(headers):
+    raw = _header(headers, "x-agentcert-proof")
+    if not raw:
+        return None
+    try:
+        return json.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)).decode())
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def inbound_decision(verifier, headers, *, mode: str, block_on=DEFAULT_BLOCK_ON):
-    """Verify the calling agent. Returns (allow: bool, status: str). In shadow
-    mode allow is always True (log only); in enforce a blocked verdict → False."""
     cert = extract_cert_pem(headers)
     if cert is None:
-        status = VerificationStatus.UNVERIFIED.value  # no credential presented
+        status = VerificationStatus.UNVERIFIED.value
     else:
-        result = verifier.verify(cert, carriage=_carriage(headers), proof=_extract_proof(headers))
-        status = result.verification_status.value
-    allow = mode != "enforce" or status not in block_on
-    return allow, status
+        res = verifier.verify(cert, carriage=_header(headers, "x-agentcert-carriage", "header"), proof=_proof(headers))
+        status = res.verification_status.value
+    return (mode != "enforce" or status not in block_on), status
 
 
-def server_trust_decision(score, *, min_score: int, mode: str):
-    """Gate on the upstream server's TrustScore. Returns (allow, reason)."""
-    if min_score <= 0:
-        return True, None
-    ok = score is not None and score >= min_score
-    if ok:
-        return True, None
-    reason = f"upstream server score {score} < required {min_score}"
-    return (mode != "enforce"), reason
+# ═══════════════════════════════════════════════════════════════════════════
+#  Observability (TRUS-2041)
+# ═══════════════════════════════════════════════════════════════════════════
+class Stats:
+    def __init__(self):
+        self._c: dict[str, int] = {}
+        self._lock = threading.Lock()
+
+    def inc(self, key, n=1):
+        with self._lock:
+            self._c[key] = self._c.get(key, 0) + n
+
+    def snapshot(self):
+        with self._lock:
+            return dict(self._c)
+
+    def prometheus(self) -> bytes:
+        lines = []
+        for k, v in self.snapshot().items():
+            metric = "mcp_trust_proxy_" + re.sub(r"[^a-zA-Z0-9_]", "_", k)
+            lines.append(f"{metric} {v}")
+        return ("\n".join(lines) + "\n").encode()
 
 
-# --------------------------------------------------------------------------- #
-#  HTTP proxy                                                                  #
-# --------------------------------------------------------------------------- #
-def _forward(upstream: str, body: bytes, headers) -> tuple[int, bytes, str]:
-    fwd = {"Content-Type": headers.get("Content-Type", "application/json")}
-    for k in headers:
-        if k.lower().startswith("x-agentcert") or k.lower() in ("accept", "mcp-session-id"):
-            fwd[k] = headers[k]
-    req = urllib.request.Request(upstream, data=body, headers=fwd, method="POST")
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return r.status, r.read(), r.headers.get("Content-Type", "application/json")
-
-
-def make_handler(cfg):
-    verifier, pins = cfg["verifier"], cfg["pins"]
+# ═══════════════════════════════════════════════════════════════════════════
+#  HTTP proxy handler
+# ═══════════════════════════════════════════════════════════════════════════
+def make_handler(ctx):
+    cfg, verifier, pins, index, stats = (
+        ctx["cfg"], ctx["verifier"], ctx["pins"], ctx["index"], ctx["stats"])
 
     class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *a):  # quiet default logging
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *a):
             pass
 
-        def _send(self, code, body: bytes, ctype="application/json"):
+        def _json(self, code, obj):
+            body = json.dumps(obj).encode()
             self.send_response(code)
-            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
 
         def _rpc_error(self, rid, code, message):
-            self._send(200, json.dumps({
-                "jsonrpc": "2.0", "id": rid,
-                "error": {"code": code, "message": message},
-            }).encode())
+            self._json(200, {"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": message}})
 
         def do_GET(self):
             if self.path == "/healthz":
-                return self._send(200, b'{"ok":true}')
-            self._send(404, b'{"error":"not found"}')
+                return self._json(200, {"ok": True})
+            if self.path == "/stats":
+                return self._json(200, stats.snapshot())
+            if self.path == "/metrics":
+                body = stats.prometheus()
+                self.send_response(200); self.send_header("Content-Type", "text/plain; version=0.0.4")
+                self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+                return
+            self._relay("GET", None)          # SSE stream open
+
+        def do_DELETE(self):
+            self._relay("DELETE", None)       # session close
 
         def do_POST(self):
             n = int(self.headers.get("Content-Length", 0))
@@ -173,37 +273,87 @@ def make_handler(cfg):
             except ValueError:
                 req = {}
             method, rid = req.get("method"), req.get("id")
+            up = cfg.route(self.path)
+            if up is None:
+                return self._rpc_error(rid, -32004, f"no upstream configured for path {self.path}")
+            stats.inc("requests_total")
 
             if method == "tools/call":
-                allow, status = inbound_decision(verifier, self.headers, mode=cfg["mode"])
-                log.info("[proxy] inbound tools/call verdict=%s allow=%s mode=%s", status, allow, cfg["mode"])
+                allow, status = inbound_decision(verifier, self.headers, mode=cfg.mode)
+                stats.inc(f"verdict_{status}")
+                log.info(json.dumps({"evt": "inbound", "verdict": status, "allow": allow, "mode": cfg.mode, "upstream": up.url}))
                 if not allow:
-                    return self._rpc_error(rid, -32001, f"agent not verified: {status}")
-                s_allow, s_reason = server_trust_decision(cfg["server_score"], min_score=cfg["min_score"], mode=cfg["mode"])
+                    stats.inc("blocked_agent"); return self._rpc_error(rid, -32001, f"agent not verified: {status}")
+                # guardrails on tool arguments
+                hits = guardrail_scan(cfg.guardrails, req.get("params", {}))
+                if hits:
+                    stats.inc("guardrail_hit")
+                    log.warning(json.dumps({"evt": "guardrail", "matched": hits, "mode": cfg.mode}))
+                    if cfg.mode == "enforce" and any(g.action == "block" for g in cfg.guardrails if g.name in hits):
+                        stats.inc("blocked_guardrail"); return self._rpc_error(rid, -32005, f"guardrail blocked: {hits}")
+                # outbound server-trust gate
+                s_allow, s_reason = server_trust_decision(index.score(up), min_score=up.min_score, mode=cfg.mode)
                 if not s_allow:
-                    log.warning("[proxy] outbound blocked: %s", s_reason)
+                    stats.inc("blocked_server"); log.warning(json.dumps({"evt": "server_gate", "reason": s_reason}))
                     return self._rpc_error(rid, -32002, s_reason)
 
-            try:
-                code, resp, ctype = _forward(cfg["upstream"], body, self.headers)
-            except Exception as exc:  # never 500 the caller's dependency
-                return self._rpc_error(rid, -32003, f"upstream unreachable: {exc}")
+            self._relay("POST", body, method=method, upstream=up)
 
+        # -- forward + stream ------------------------------------------------
+        def _relay(self, http_method, body, *, method=None, upstream=None):
+            up = upstream or cfg.route(self.path)
+            if up is None:
+                self.send_response(404); self.end_headers(); return
+            fwd = {}
+            for k in self.headers:
+                if k.lower().startswith("x-agentcert") or k.lower() in ("content-type", "accept", "mcp-session-id", "last-event-id"):
+                    fwd[k] = self.headers[k]
+            target = up.url + self.path[len(up.path):] if self.path.startswith(up.path) else up.url
+            req = urllib.request.Request(target, data=body, headers=fwd, method=http_method)
+            try:
+                resp = urllib.request.urlopen(req, timeout=120)
+            except Exception as exc:  # noqa: BLE001
+                stats.inc("upstream_error"); return self._rpc_error(None, -32003, f"upstream unreachable: {exc}")
+
+            ctype = resp.headers.get("Content-Type", "application/json")
+            if "text/event-stream" in ctype:
+                # stream SSE straight through (Connection: close so no Content-Length)
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                if resp.headers.get("Mcp-Session-Id"):
+                    self.send_header("Mcp-Session-Id", resp.headers["Mcp-Session-Id"])
+                self.send_header("Cache-Control", "no-cache"); self.send_header("Connection", "close")
+                self.end_headers()
+                try:
+                    while True:
+                        chunk = resp.read(1024)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk); self.wfile.flush()
+                except Exception:  # noqa: BLE001 - client disconnect
+                    pass
+                return
+            # buffered JSON response
+            payload = resp.read()
             if method == "tools/list":
                 try:
-                    tools = json.loads(resp).get("result", {}).get("tools", [])
-                    drift = pins.diff(cfg["upstream"], tools)
+                    drift = pins.diff(up.url, json.loads(payload).get("result", {}).get("tools", []))
                     if drift:
-                        log.warning("[proxy] RUG-PULL drift on %s: %s", cfg["upstream"], drift)
+                        stats.inc("rug_pull"); log.warning(json.dumps({"evt": "rug_pull", "upstream": up.url, "drift": drift}))
                 except Exception:  # noqa: BLE001
                     pass
-            self._send(code, resp, ctype)
+            self.send_response(resp.status)
+            self.send_header("Content-Type", ctype)
+            if resp.headers.get("Mcp-Session-Id"):
+                self.send_header("Mcp-Session-Id", resp.headers["Mcp-Session-Id"])
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
 
     return Handler
 
 
 def _build_verifier():
-    import time
     from cryptography.hazmat.primitives.asymmetric import ec
     from agentcert_tag import HttpTrustSource, InMemoryTrustSource, Mode, FailMode, Verifier
     path = os.environ.get("TAG_ANCHORS_PEM")
@@ -229,18 +379,14 @@ def _build_verifier():
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    cfg = {
-        "upstream": os.environ["MCP_PROXY_UPSTREAM"],
-        "mode": os.environ.get("TAG_MODE", "shadow"),
-        "min_score": int(os.environ.get("MCP_PROXY_MIN_SERVER_SCORE", "0")),
-        "server_score": (int(os.environ["MCP_PROXY_SERVER_SCORE"])
-                         if os.environ.get("MCP_PROXY_SERVER_SCORE") else None),
-        "verifier": _build_verifier(),
-        "pins": ToolPins(),
-    }
-    port = int(os.environ.get("MCP_PROXY_PORT", "8081"))
-    log.info("MCP Trust Proxy → upstream=%s mode=%s port=%s", cfg["upstream"], cfg["mode"], port)
-    ThreadingHTTPServer(("0.0.0.0", port), make_handler(cfg)).serve_forever()
+    cfg = Config.load()
+    if not cfg.upstreams:
+        raise SystemExit("configure at least one upstream (MCP_PROXY_CONFIG or MCP_PROXY_UPSTREAM)")
+    ctx = {"cfg": cfg, "verifier": _build_verifier(), "pins": ToolPins(),
+           "index": TrustIndex(cfg.trust_index_url), "stats": Stats()}
+    log.info(json.dumps({"evt": "start", "mode": cfg.mode, "port": cfg.port,
+                         "upstreams": [(u.path, u.url) for u in cfg.upstreams]}))
+    ThreadingHTTPServer(("0.0.0.0", cfg.port), make_handler(ctx)).serve_forever()
 
 
 if __name__ == "__main__":

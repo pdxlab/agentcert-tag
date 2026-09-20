@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: {{ .Release.Name }}-mcp-trust-proxy }
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector: { matchLabels: { app: {{ .Release.Name }}-mcp-trust-proxy } }
+  template:
+    metadata: { labels: { app: {{ .Release.Name }}-mcp-trust-proxy } }
+    spec:
+      containers:
+        - name: mcp-trust-proxy
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports: [{ containerPort: {{ .Values.service.port }} }]
+          env:
+            - { name: TAG_MODE, value: {{ .Values.mode | quote }} }
+            {{- if .Values.config }}
+            - { name: MCP_PROXY_CONFIG, value: /config/config.json }
+            {{- else }}
+            - { name: MCP_PROXY_UPSTREAM, value: {{ .Values.upstream | quote }} }
+            {{- end }}
+            {{- if .Values.anchorsPem }}
+            - { name: TAG_ANCHORS_PEM, value: /anchors/anchors.pem }
+            {{- end }}
+          readinessProbe: { httpGet: { path: /healthz, port: {{ .Values.service.port }} } }
+          resources: {{ .Values.resources | toYaml | nindent 12 }}
+          volumeMounts:
+            {{- if .Values.config }}
+            - { name: config, mountPath: /config }
+            {{- end }}
+            {{- if .Values.anchorsPem }}
+            - { name: anchors, mountPath: /anchors }
+            {{- end }}
+      volumes:
+        {{- if .Values.config }}
+        - { name: config, configMap: { name: {{ .Release.Name }}-mcp-trust-proxy } }
+        {{- end }}
+        {{- if .Values.anchorsPem }}
+        - { name: anchors, configMap: { name: {{ .Release.Name }}-mcp-trust-proxy-anchors } }
+        {{- end }}

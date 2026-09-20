@@ -1,0 +1,9 @@
+apiVersion: v2
+name: mcp-trust-proxy
+description: Trust-first proxy in front of MCP servers — verify agents, score servers, block rug-pulls.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://trustmodel.ai/verify
+sources:
+  - https://github.com/pdxlab/agentcert-tag

@@ -1,0 +1,14 @@
+# One-command trust proxy in front of your MCP server.
+services:
+  mcp-trust-proxy:
+    image: ghcr.io/pdxlab/agentcert-tag/mcp-trust-proxy:latest
+    ports: ["8081:8081"]
+    environment:
+      TAG_MODE: shadow                       # shadow (log) -> enforce (block)
+      MCP_PROXY_UPSTREAM: http://your-mcp:9000/mcp
+      TAG_ANCHORS_PEM: /anchors/anchors.pem
+    volumes:
+      - ./anchors:/anchors:ro
+    # for multi-upstream / guardrails, mount a config instead:
+    #   MCP_PROXY_CONFIG: /config/config.json
+    #   volumes: ["./config:/config:ro"]

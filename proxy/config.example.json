@@ -1,0 +1,14 @@
+{
+  "mode": "shadow",
+  "fail_mode": "closed",
+  "listen_port": 8081,
+  "trust_index_url": "https://api.trustmodel.ai",
+  "upstreams": [
+    { "path": "/mcp/excel", "url": "http://excel-mcp:9000/mcp", "min_score": 700, "ans_name": "ans://v1.0.0.excel.example.com" },
+    { "path": "/", "url": "http://default-mcp:9000/mcp", "min_score": 0, "server_score": 812 }
+  ],
+  "guardrails": [
+    { "name": "block-ssn", "deny_pattern": "\\b\\d{3}-\\d{2}-\\d{4}\\b", "action": "block" },
+    { "name": "flag-aws-key", "deny_pattern": "AKIA[0-9A-Z]{16}", "action": "flag" }
+  ]
+}
