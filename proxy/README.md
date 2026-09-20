@@ -49,4 +49,9 @@ thresholds, `trust_index_url` for live server scores, and guardrail deny-pattern
 | `TAG_ANCHORS_PEM` | trust-anchor bundle for cert-chain validation |
 | `TRUSTMODEL_BASE_URL` | live Reputation/CRL backend (else offline cert-baked scores) |
 
+## Performance — the trust tax
+A full AgentCert verification adds **~2.6 ms** over plain plumbing; an unverified
+call is nearly free. Reproducible harness + numbers + optimization roadmap:
+[`benchmarks/`](benchmarks/README.md) (`python proxy/benchmarks/bench.py`).
+
 Security: [`THREAT_MODEL.md`](THREAT_MODEL.md).
