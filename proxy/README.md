@@ -1,30 +1,52 @@
 # MCP Trust Proxy (TRUS-2032)
 
-A **trust-first proxy** that sits in front of one or more MCP servers and enforces
-trust in **both directions**, reusing the `agentcert_tag` verify core:
+Put it **in front of any MCP server — zero changes to the server.** Point your agent
+at the proxy; the proxy forwards to the upstream and enforces trust in **both
+directions**. Less invasive than adding a verify-gate to the server's code — nothing
+to import, just a hop in front.
 
-- **inbound** — verifies the calling agent's AgentCert + TrustScore on every
-  `tools/call` (proof-of-possession on the header carriage). shadow → log; enforce → block.
-- **outbound** — gates on the upstream server's TrustScore vs a threshold.
-- **rug-pull** — pins each server's tool definitions and flags silent drift.
+## What it does
+- **Verify the agent (inbound)** — checks the caller's AgentCert + TrustScore (with
+  proof-of-possession) on every `tools/call`.
+- **Score the server (outbound)** — gates on the upstream's TrustScore (from config
+  or the public Trust Index) vs a threshold.
+- **Block rug-pulls** — pins each server's tool definitions and flags silent drift.
+- **Guardrails** — deny-patterns on tool arguments (PII / secrets / injection).
+- **Route many servers** behind one endpoint by path prefix.
+- **Streamable-HTTP** — JSON *and* SSE responses, session lifecycle (GET/POST/DELETE).
+- **Observability** — `/healthz`, `/stats`, `/metrics` (Prometheus), structured JSON logs.
 
-**Shadow by default** (decides + logs, blocks nothing). Stdlib-only.
+**Shadow by default** (decide + log, block nothing). Set `TAG_MODE=enforce` to block.
 
+## Quickstart — one command
 ```bash
 docker run -p 8081:8081 \
   -e MCP_PROXY_UPSTREAM=http://your-mcp-server:9000/mcp \
-  -e TAG_ANCHORS_PEM=/anchors.pem \
-  -e TAG_MODE=shadow \
+  -e TAG_ANCHORS_PEM=/anchors/anchors.pem -v $PWD/anchors:/anchors:ro \
   ghcr.io/pdxlab/agentcert-tag/mcp-trust-proxy:latest
+# point your MCP client at http://localhost:8081 instead of the server
 ```
 
-| Env | Meaning |
+## Multi-upstream + guardrails (config file)
+Mount a JSON config (`MCP_PROXY_CONFIG=/config/config.json`) — see
+[`config.example.json`](config.example.json): route by path, per-upstream score
+thresholds, `trust_index_url` for live server scores, and guardrail deny-patterns.
+
+## Deploy
+- **Docker Compose:** [`docker-compose.example.yml`](docker-compose.example.yml)
+- **Helm:** `helm install trust-proxy ./helm --set upstream=http://your-mcp:9000/mcp`
+  (or `--set-json config='{...}'` for multi-upstream). See [`helm/values.yaml`](helm/values.yaml).
+
+## Config reference
+| Env / key | Meaning |
 |---|---|
-| `MCP_PROXY_UPSTREAM` | upstream MCP server URL (required) |
-| `TAG_MODE` | `shadow` (default) or `enforce` |
-| `MCP_PROXY_MIN_SERVER_SCORE` | block upstreams below this TrustScore (0 = off) |
+| `MCP_PROXY_UPSTREAM` | single upstream URL (or use `upstreams` in config) |
+| `MCP_PROXY_CONFIG` | path to a JSON config (multi-upstream, guardrails) |
+| `TAG_MODE` | `shadow` (default) / `enforce` |
+| `TAG_FAIL_MODE` | `closed` (default) / `open` |
+| `MCP_PROXY_MIN_SERVER_SCORE` | block upstreams below this score (0 = off) |
+| `MCP_PROXY_TRUST_INDEX_URL` | Trust Index API base for live server scores |
 | `TAG_ANCHORS_PEM` | trust-anchor bundle for cert-chain validation |
 | `TRUSTMODEL_BASE_URL` | live Reputation/CRL backend (else offline cert-baked scores) |
 
-Roadmap (per epic TRUS-2033–2042): multi-upstream routing, discovery from the ANS
-Trust Index, AGP inline guardrails, and the console trust dashboard.
+Security: [`THREAT_MODEL.md`](THREAT_MODEL.md).

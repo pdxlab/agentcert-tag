@@ -1,0 +1,17 @@
+{{- if .Values.config }}
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: {{ .Release.Name }}-mcp-trust-proxy }
+data:
+  config.json: |
+{{ .Values.config | toPrettyJson | indent 4 }}
+{{- end }}
+{{- if .Values.anchorsPem }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: {{ .Release.Name }}-mcp-trust-proxy-anchors }
+data:
+  anchors.pem: |
+{{ .Values.anchorsPem | indent 4 }}
+{{- end }}

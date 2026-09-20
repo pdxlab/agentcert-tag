@@ -69,3 +69,27 @@ def test_server_trust_decision():
     assert proxy.server_trust_decision(600, min_score=700, mode="enforce")[0] is False
     assert proxy.server_trust_decision(600, min_score=700, mode="shadow")[0] is True   # shadow never blocks
     assert proxy.server_trust_decision(None, min_score=700, mode="enforce")[0] is False
+
+
+# ── routing (TRUS-2033) ──
+def test_config_routing_longest_prefix():
+    cfg = proxy.Config({"upstreams": [
+        {"path": "/", "url": "http://root:9000"},
+        {"path": "/mcp/excel", "url": "http://excel:9000"},
+    ]})
+    assert cfg.route("/mcp/excel/x").url == "http://excel:9000"
+    assert cfg.route("/other").url == "http://root:9000"
+
+
+# ── guardrails (TRUS-2037) ──
+def test_guardrail_scan():
+    gs = [proxy.Guardrail({"name": "ssn", "deny_pattern": r"\b\d{3}-\d{2}-\d{4}\b", "action": "block"})]
+    assert proxy.guardrail_scan(gs, {"arguments": {"note": "ssn 123-45-6789"}}) == ["ssn"]
+    assert proxy.guardrail_scan(gs, {"arguments": {"note": "hello"}}) == []
+
+
+# ── discovery / server score (TRUS-2035/2038) ──
+def test_trust_index_static_and_unknown():
+    idx = proxy.TrustIndex(None)
+    assert idx.score(proxy.Upstream({"url": "u", "server_score": 800})) == 800
+    assert idx.score(proxy.Upstream({"url": "u"})) is None
