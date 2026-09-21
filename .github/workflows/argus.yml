@@ -1,0 +1,149 @@
+name: Argus Review
+
+# Argus PR reviewer (TRUS-1647) — vendored under .argus/ (from karlmehta/argus).
+# Reviews across security, data-protection, correctness, concurrency, performance,
+# api-compat, tests, observability, dependencies; posts one severity-ranked review.
+# To update skills/prompts, re-vendor from karlmehta/argus@v1.
+#
+# AUTH: Microsoft Foundry via Azure OIDC. No Anthropic API key is stored here —
+# azure/login exchanges GitHub's short-lived OIDC token for an Azure token and
+# claude-code-action calls Foundry with it. Nothing to rotate. The verdict policy
+# still comes from .argus/config/argus.yml, unchanged by this commit.
+
+on:
+  # Auto-review on open / reopen / ready-for-review, plus on-demand via an
+  # '@argus' comment. Deliberately NOT on 'synchronize': re-reviewing every push
+  # is the cost problem #503 fixed. Push fixes, then comment '@argus'.
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: read
+  id-token: write
+
+concurrency:
+  group: argus-${{ github.event.pull_request.number || github.event.issue.number }}
+  # Cancel only superseded pull_request runs. NOT for issue_comment: Argus
+  # posting its own review fires a new issue_comment event, and because this
+  # concurrency group is workflow-level while the bot guard is a job-level
+  # `if:`, that run joins the group and cancels the still-finishing original
+  # BEFORE the guard can skip it — silently losing a completed review.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  review:
+    # Team-invokable, auto-reviewing.
+    #
+    # UNCHANGED from the #528 lock-down, and the part that actually mattered:
+    # Argus cannot merge — no `gh pr merge` in allowedTools, no
+    # automerge workflow in this repo, and repo-level allow_auto_merge is false.
+    # The auto-approve + auto-merge loop behind the #528 incident stays
+    # impossible three ways over.
+    #
+    # CHANGED (TRUS-1955): this repo now matches the other seven. Any human with
+    # write access can comment '@argus', and PRs are auto-reviewed on open /
+    # reopen / ready-for-review. Previously Argus was installed here but pinned
+    # to the owner and never ran on its own, so it was dormant in practice.
+    # The #528 incident was an auto-approve + auto-MERGE loop; auto-review was
+    # never the cause, and the merge path stays closed. Bots are excluded —
+    # claude-code-action hard-fails on a bot-initiated run, and it stops Argus's
+    # own comment from retriggering it.
+    if: >
+      (github.event_name == 'workflow_dispatch' &&
+        github.actor != 'dependabot[bot]') ||
+      (github.event_name == 'pull_request' &&
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.user.type != 'Bot' &&
+        github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request != null &&
+        github.event.comment.user.type != 'Bot' &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
+        contains(github.event.comment.body, '@argus'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Azure login (OIDC — no stored credential)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_ARGUS }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID_QA }}
+
+      - name: Record start time
+        id: argus_start
+        run: echo "ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Run Argus
+        uses: anthropics/claude-code-action@v1
+        env:
+          # Foundry DEPLOYMENT names (not model families). Both exist in the
+          # account above: the reviewer runs on the Sonnet tier, and Claude Code
+          # uses the Haiku tier for small/background calls.
+          ANTHROPIC_FOUNDRY_RESOURCE: aif-trustmodel-qa
+          ANTHROPIC_DEFAULT_SONNET_MODEL: claude-sonnet-4-6
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: claude-haiku-4-5
+        with:
+          use_foundry: "true"
+          prompt: |
+            You are **Argus**, this repository's automated PR reviewer.
+            Review pull request #${{ github.event.pull_request.number || github.event.issue.number }}.
+
+            1. Read `.argus/prompts/system.md` (persona + hard rules — you never
+               approve merely to clear a gate).
+            2. Read `.argus/config/argus.yml` (enabled skills, severity gate, path
+               skip/strict rules, limits).
+            3. Load each enabled skill from `.argus/skills/<name>.md`.
+            4. Load repo memory: `.argus/memory/conventions.md`,
+               `.argus/memory/accepted-patterns.md`, relevant `.argus/memory/knowledge/*`.
+               Treat accepted-patterns as authoritative — do not re-flag them.
+            5. `gh pr diff ${{ github.event.pull_request.number || github.event.issue.number }}`;
+               read surrounding code before judging.
+            6. Apply each skill, reconcile with memory, dedupe, rank by severity,
+               and calibrate (cut low-confidence findings) per `.argus/prompts/review.md`.
+            7. Post ONE consolidated review per `.argus/prompts/verdict.md`:
+               request-changes on a confirmed blocker/major; else comment. Only
+               approve if `verdict.allow_approve: true` AND the change is genuinely
+               clean AND the author is not a bot.
+          claude_args: >-
+            --model claude-sonnet-4-6 --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh pr comment:*),Read,Grep,Glob"
+
+      # A green "Argus Review" check is not proof a review happened. That has
+      # bitten three separate ways (TRUS-1955): an approval with an empty body,
+      # a stub review pointing at a separate comment, and a run that finished
+      # clean and posted nothing at all. Each time the only signal was green.
+      # Turn a silent no-review into a red check.
+      #
+      # Exception: claude-code-action refuses to run when argus.yml differs from
+      # the copy on the default branch, so a PR that edits argus.yml legitimately
+      # gets no review. Skip the guard there instead of always failing it.
+      - name: Fail if Argus posted no review
+        if: always() && github.event_name != 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number || github.event.issue.number }}
+          SINCE: ${{ steps.argus_start.outputs.ts }}
+        run: |
+          set -euo pipefail
+          if gh pr diff "$PR" --name-only | grep -qx '.github/workflows/argus.yml'; then
+            echo "::notice::This PR edits argus.yml, so claude-code-action will not run. No review expected."
+            exit 0
+          fi
+          n=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/reviews" --paginate \
+                | jq --arg since "$SINCE" '[.[]
+                    | select(.user.login == "claude[bot]")
+                    | select(.submitted_at >= $since)
+                    | select((.body | length) > 0)] | length')
+          if [ "${n:-0}" -eq 0 ]; then
+            echo "::error::Argus finished but posted no review with a body on #$PR. See TRUS-1955."
+            exit 1
+          fi
+          echo "Argus posted $n review(s) with a body on #$PR."
