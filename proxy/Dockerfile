@@ -1,5 +1,6 @@
 # MCP Trust Proxy — trust-first proxy in front of MCP servers (TRUS-2032).
 FROM python:3.12-slim
+LABEL io.modelcontextprotocol.server.name="io.github.pdxlab/mcp-trust-proxy"
 WORKDIR /app
 COPY core/ /app/core/
 COPY proxy/mcp_trust_proxy.py /app/proxy/mcp_trust_proxy.py

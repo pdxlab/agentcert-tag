@@ -1,52 +1,61 @@
 {
-  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-07-09/server.schema.json",
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.pdxlab/mcp-trust-proxy",
-  "description": "Drop a TrustModel trust layer in front of any MCP server — verifies the caller's AgentCert + TrustScore inbound and scores the upstream outbound, per tools/call. Shadow by default; ~0.4 ms added per verify.",
+  "title": "MCP Trust Proxy",
+  "description": "Trust layer in front of any MCP server: verifies AgentCert + TrustScore per tools/call.",
   "repository": {
     "url": "https://github.com/pdxlab/agentcert-tag",
     "source": "github",
     "subfolder": "proxy"
   },
-  "version": "0.2.0",
-  "websiteUrl": "https://trustmodel.ai",
+  "version": "0.1.0",
+  "websiteUrl": "https://trustmodel.ai/verify",
   "packages": [
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/pdxlab/agentcert-tag/mcp-trust-proxy",
-      "version": "0.2.0",
+      "identifier": "ghcr.io/pdxlab/agentcert-tag/mcp-trust-proxy:0.1.0",
       "transport": { "type": "streamable-http", "url": "http://localhost:8081" },
+      "runtimeArguments": [
+        {
+          "type": "named",
+          "name": "-p",
+          "description": "Publish the proxy port",
+          "value": "8081:8081",
+          "isRequired": true
+        },
+        {
+          "type": "named",
+          "name": "--mount",
+          "description": "Mount the trust-anchor bundle the verifier validates certs against",
+          "value": "type=bind,src={anchors_path},dst=/anchors/roots.pem,ro=true",
+          "isRequired": true,
+          "variables": {
+            "anchors_path": {
+              "description": "Host path to your trust-anchor PEM bundle",
+              "format": "filepath",
+              "isRequired": true
+            }
+          }
+        }
+      ],
       "environmentVariables": [
         {
           "name": "MCP_PROXY_UPSTREAM",
-          "description": "The MCP server to front, e.g. http://host:9000/mcp",
+          "description": "Upstream MCP server URL to put the trust layer in front of",
+          "isRequired": true
+        },
+        {
+          "name": "TAG_ANCHORS_PEM",
+          "description": "Path to the mounted trust-anchor bundle",
           "isRequired": true,
-          "format": "string"
+          "default": "/anchors/roots.pem"
         },
         {
           "name": "TAG_MODE",
-          "description": "shadow (verify + log, block nothing — default) or enforce",
-          "default": "shadow",
-          "format": "string"
-        },
-        {
-          "name": "TAG_FAIL_MODE",
-          "description": "On a verification error: closed (deny, default) or open",
-          "default": "closed",
-          "format": "string"
-        },
-        {
-          "name": "MCP_PROXY_TRUST_INDEX_URL",
-          "description": "Trust Index API base for live upstream scores",
-          "default": "https://api.trustmodel.ai",
-          "format": "string"
+          "description": "shadow (default, logs only) or enforce",
+          "default": "shadow"
         }
       ]
-    },
-    {
-      "registryType": "pypi",
-      "identifier": "trustmodel-agentcert-tag",
-      "version": "0.2.0",
-      "transport": { "type": "streamable-http", "url": "http://localhost:8081" }
     }
   ]
 }
