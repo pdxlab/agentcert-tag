@@ -34,6 +34,18 @@ docker run -p 8080:8080 ghcr.io/pdxlab/agentcert-tag/sidecar:latest
 
 Point your gateway's external-authorization callout at `http://<sidecar>:8080/verify`.
 
+## Gateway recipes — `integrations/`
+
+Copy-paste configs that wire the verify sidecar into a specific gateway, all
+shadow-mode by default.
+
+- **agentgateway** — [`integrations/agentgateway/`](integrations/agentgateway/) ·
+  `extAuthz` policy, no code in the gateway.
+- **Higress** — [`integrations/higress/`](integrations/higress/) · native
+  `ext-auth` wasm plugin (config, not code).
+- **Tyk** — [`integrations/tyk/`](integrations/tyk/) · custom-auth JSVM middleware
+  that calls the sidecar.
+
 ## Language SDKs (MCP servers)
 
 - npm `@trustmodel/agentcert-tag` · PyPI `trustmodel-agentcert-tag` — drop-in
@@ -41,7 +53,7 @@ Point your gateway's external-authorization callout at `http://<sidecar>:8080/ve
 
 ## On request / roadmap
 
-Native plugins for **agentgateway, Lasso, LiteLLM, Bifrost, Pomerium, Docker MCP
-Gateway** and others are integration-on-request today — the sidecar's ext_authz
+Native plugins for **Lasso, LiteLLM, Bifrost, Pomerium, Docker MCP Gateway** and
+others are integration-on-request today — the sidecar's ext_authz
 path already covers any gateway that supports an external-auth callout. Open an
 issue if you'd like a native plugin for your gateway.

@@ -1,0 +1,50 @@
+# TAG — AgentCert + TrustScore verification for agentgateway via extAuthz.
+#
+# No plugin code in agentgateway (confirmed by maintainer in agentgateway#3573):
+# it calls the TAG verify sidecar over HTTP ext_authz and reads the verdict.
+# Shadow-mode by default — run the sidecar with TAG_MODE=shadow and it returns
+# 200/allow on every request, so this blocks NOTHING until you set TAG_MODE=enforce.
+#
+# Run the sidecar next to agentgateway:
+#   docker run -p 8080:8080 -e TAG_MODE=shadow \
+#     -e TAG_ANCHORS_PEM=/anchors/roots.pem -v $PWD/anchors:/anchors:ro \
+#     ghcr.io/pdxlab/agentcert-tag/sidecar:latest
+#
+# Config key path: binds[].listeners[].routes[].policies.extAuthz
+binds:
+  - port: 3000
+    listeners:
+      - name: default
+        protocol: HTTP
+        routes:
+          - name: mcp
+            backends:
+              - host: your-mcp-server:9000
+            policies:
+              extAuthz:
+                host: tag-sidecar:8080
+                protocol:
+                  http:
+                    # agentgateway calls exactly this path (CEL string, no append) —
+                    # matches the sidecar's exact /ext_authz match.
+                    path: '"/ext_authz"'
+                    # forward the AgentCert headers to the verifier (default would
+                    # send only Authorization).
+                    includeRequestHeaders:
+                      - x-agent-cert
+                      - x-agent-cert-proof
+                      - x-agent-cert-carriage
+                      - x-agent-id
+                    # surface the verdict onto the upstream request so your own
+                    # policy/logs can act on it. 200 from the sidecar = allow.
+                    includeResponseHeaders:
+                      - x-agentcert-verdict
+                      - x-agentcert-agent-id
+                      - x-agentcert-trustscore
+                      - x-agentcert-tier
+                      - x-agentcert-decision
+                      - x-agentcert-shadow-would
+                # verifier unreachable -> deny in enforce; in shadow the sidecar
+                # answers 200 regardless, so nothing is blocked.
+                failureMode:
+                  denyWithStatus: 503
