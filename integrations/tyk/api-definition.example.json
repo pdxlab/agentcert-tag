@@ -1,0 +1,19 @@
+{
+  "name": "mcp-behind-tag",
+  "api_id": "mcp-behind-tag",
+  "use_keyless": false,
+  "custom_plugin_auth_enabled": true,
+  "custom_middleware": {
+    "driver": "otto",
+    "auth_check": {
+      "name": "agentCertAuthCheck",
+      "path": "verify.js"
+    }
+  },
+  "custom_middleware_bundle": "tag-agentcert-bundle.zip",
+  "proxy": {
+    "listen_path": "/mcp/",
+    "target_url": "http://your-mcp-server:9000",
+    "strip_listen_path": true
+  }
+}
