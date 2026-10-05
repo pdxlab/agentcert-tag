@@ -1,3 +1,4 @@
+rockspec_format = "3.0"
 package = "kong-plugin-agentcert-tag"
 version = "0.2.0-1"
 source = {
@@ -13,7 +14,10 @@ description = {
     policy rules. Does NOT replace Kong's policy engine.
   ]],
   homepage = "https://trustmodel.ai/verify",
+  issues_url = "https://github.com/pdxlab/agentcert-tag/issues",
+  maintainer = "TrustModel <support@trustmodel.ai>",
   license = "MIT",
+  labels = { "kong-plugin", "kong", "agentcert", "trustscore", "mtls", "verification", "security" },
 }
 dependencies = {
   "lua >= 5.1",
