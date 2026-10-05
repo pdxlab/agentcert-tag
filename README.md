@@ -15,10 +15,10 @@ This is the consumption/verification half of the AgentCert loop. The other half
 — minting a cert automatically at CI/CD deploy time — is
 [`agentcert-issue-action`](https://github.com/pdxlab/agentcert-issue-action).
 
-## No-code: drop a trust layer in front of any MCP server
+## Self-host: drop a trust layer in front of any MCP server
 
 Don't want to touch your gateway? The [**MCP Trust Proxy**](proxy/) is a
-one-command hop you put in front of any MCP server — it verifies the caller's
+single-container hop you run in front of any MCP server — it verifies the caller's
 AgentCert + TrustScore inbound and scores the upstream outbound, **shadow by
 default**, ~0.4 ms added per verify
 ([benchmarks](https://github.com/pdxlab/mcp-trust-proxy-benchmarking)):
@@ -26,13 +26,16 @@ default**, ~0.4 ms added per verify
 ```bash
 docker run -p 8081:8081 \
   -e MCP_PROXY_UPSTREAM=http://your-mcp-server:9000/mcp \
-  ghcr.io/pdxlab/agentcert-tag/mcp-trust-proxy:latest
+  -e TAG_ANCHORS_PEM=/anchors/roots.pem -v $PWD/anchors:/anchors:ro \
+  ghcr.io/pdxlab/agentcert-tag/mcp-trust-proxy:0.1.0
 # point your MCP client at http://localhost:8081 instead of the server
 ```
 
-Also on PyPI (`pip install trustmodel-agentcert-tag`) and listed on Smithery /
-the MCP registry — see [`proxy/smithery.yaml`](proxy/smithery.yaml) and
-[`proxy/server.json`](proxy/server.json).
+The verifier needs a trust-anchor bundle (`anchors/roots.pem`) to validate cert
+chains against — see [`proxy/README.md`](proxy/README.md) for the full config.
+The image is on GHCR; [`proxy/server.json`](proxy/server.json) describes it as a
+self-hosted OCI package for the MCP registry (listing in progress). The verify-gate
+*library* (not the proxy) is on PyPI as `trustmodel-agentcert-tag`.
 
 ---
 
