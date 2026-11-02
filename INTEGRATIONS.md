@@ -41,6 +41,10 @@ shadow-mode by default.
 
 - **agentgateway** — [`integrations/agentgateway/`](integrations/agentgateway/) ·
   `extAuthz` policy, no code in the gateway.
+- **Envoy Gateway** — [`integrations/envoy-gateway/`](integrations/envoy-gateway/) ·
+  `SecurityPolicy` `extAuth.http`, no code in the gateway.
+- **Kuadrant** — [`integrations/kuadrant/`](integrations/kuadrant/) · Istio
+  `CUSTOM` ext_authz, runs alongside Kuadrant's own `AuthPolicy`.
 - **Higress** — [`integrations/higress/`](integrations/higress/) · native
   `ext-auth` wasm plugin (config, not code).
 - **Tyk** — [`integrations/tyk/`](integrations/tyk/) · custom-auth JSVM middleware
