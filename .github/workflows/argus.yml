@@ -18,7 +18,17 @@ on:
     types: [opened, reopened, ready_for_review]
   issue_comment:
     types: [created]
+  # On-demand against a chosen PR. Needed because `pull_request` deliberately
+  # omits 'synchronize', so a push does not re-trigger; without this the only
+  # ways to re-run were an '@argus' comment or close/reopen. `required` closes
+  # the empty-PR path: the trigger and the job guard admit workflow_dispatch,
+  # but the Run step below needs an actual PR number to resolve.
   workflow_dispatch:
+    inputs:
+      pr:
+        description: PR number to review
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -27,7 +37,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: argus-${{ github.event.pull_request.number || github.event.issue.number }}
+  group: argus-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
   # Cancel only superseded pull_request runs. NOT for issue_comment: Argus
   # posting its own review fires a new issue_comment event, and because this
   # concurrency group is workflow-level while the bot guard is a job-level
@@ -95,7 +105,7 @@ jobs:
           use_foundry: "true"
           prompt: |
             You are **Argus**, this repository's automated PR reviewer.
-            Review pull request #${{ github.event.pull_request.number || github.event.issue.number }}.
+            Review pull request #${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}.
 
             1. Read `.argus/prompts/system.md` (persona + hard rules — you never
                approve merely to clear a gate).
@@ -105,7 +115,7 @@ jobs:
             4. Load repo memory: `.argus/memory/conventions.md`,
                `.argus/memory/accepted-patterns.md`, relevant `.argus/memory/knowledge/*`.
                Treat accepted-patterns as authoritative — do not re-flag them.
-            5. `gh pr diff ${{ github.event.pull_request.number || github.event.issue.number }}`;
+            5. `gh pr diff ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}`;
                read surrounding code before judging.
             6. Apply each skill, reconcile with memory, dedupe, rank by severity,
                and calibrate (cut low-confidence findings) per `.argus/prompts/review.md`.
@@ -129,7 +139,7 @@ jobs:
         if: always() && github.event_name != 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.pull_request.number || github.event.issue.number }}
+          PR: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
           SINCE: ${{ steps.argus_start.outputs.ts }}
         run: |
           set -euo pipefail
