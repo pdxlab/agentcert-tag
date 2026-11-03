@@ -37,7 +37,11 @@ permissions:
   id-token: write
 
 concurrency:
-  group: argus-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
+  # Jayesh #3 round-2 review (ans-registry parity) — ``inputs.pr`` FIRST:
+  # on a ``workflow_dispatch`` run the other two are both unset, so leaving
+  # it last resolves the whole expression to ``""`` and every manual
+  # dispatch joins the same empty-string group, cancelling each other.
+  group: argus-${{ inputs.pr || github.event.pull_request.number || github.event.issue.number }}
   # Cancel only superseded pull_request runs. NOT for issue_comment: Argus
   # posting its own review fires a new issue_comment event, and because this
   # concurrency group is workflow-level while the bot guard is a job-level
@@ -77,6 +81,38 @@ jobs:
         contains(github.event.comment.body, '@argus'))
     runs-on: ubuntu-latest
     steps:
+      # Jayesh #3 round-2 review (ans-registry parity) —
+      # AUTHENTICATION IS NOT AUTHORIZATION. The job guard above admits
+      # OWNER / MEMBER / COLLABORATOR via ``author_association``, but
+      # those are RELATIONSHIP labels, not permissions: a read-only org
+      # member commenting on a PR is still ``MEMBER``. This job runs in
+      # the default-branch context with ``id-token: write`` and
+      # ``pull-requests: write``, so the comment that starts it is an
+      # authorization boundary and has to be checked as one.
+      #
+      # On a trust-boundary repo (TAG verifier) we check it explicitly.
+      #
+      # ACTOR is passed through env, never interpolated into the shell
+      # script: a login is attacker-influenced text and ``${{ }}``
+      # inside a ``run:`` is substituted BEFORE bash parses it, so a
+      # crafted login name would land as shell. The env path makes the
+      # value an opaque variable to bash.
+      - name: Verify the commenter can actually write here
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.event.comment.user.login }}
+        run: |
+          set -euo pipefail
+          perm=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" \
+                   --jq '.permission')
+          echo "$ACTOR has '$perm' on $GITHUB_REPOSITORY"
+          case "$perm" in
+            admin|maintain|write) ;;
+            *) echo "::error::$ACTOR does not have write access to this repository; refusing to run a privileged review job."
+               exit 1 ;;
+          esac
+
       # Jayesh #3 review — check out the BASE branch, not the PR's merge
       # commit, so ``.argus/`` (prompts, allow_approve, accepted-patterns)
       # is read from main. A PR that edits ``.argus/`` would otherwise be
@@ -122,7 +158,7 @@ jobs:
           github_token: ${{ github.token }}
           prompt: |
             You are **Argus**, this repository's automated PR reviewer.
-            Review pull request #${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}.
+            Review pull request #${{ inputs.pr || github.event.pull_request.number || github.event.issue.number }}.
 
             1. Read `.argus/prompts/system.md` (persona + hard rules — you never
                approve merely to clear a gate).
@@ -132,7 +168,7 @@ jobs:
             4. Load repo memory: `.argus/memory/conventions.md`,
                `.argus/memory/accepted-patterns.md`, relevant `.argus/memory/knowledge/*`.
                Treat accepted-patterns as authoritative — do not re-flag them.
-            5. `gh pr diff ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}`;
+            5. `gh pr diff ${{ inputs.pr || github.event.pull_request.number || github.event.issue.number }}`;
                read surrounding code before judging.
             6. Apply each skill, reconcile with memory, dedupe, rank by severity,
                and calibrate (cut low-confidence findings) per `.argus/prompts/review.md`.
@@ -156,7 +192,9 @@ jobs:
         if: always() && github.event_name != 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
+          # Jayesh #3 round-2 review (ans-registry parity) — ``inputs.pr``
+          # first for the same reason as ``concurrency.group`` above.
+          PR: ${{ inputs.pr || github.event.pull_request.number || github.event.issue.number }}
           SINCE: ${{ steps.argus_start.outputs.ts }}
         run: |
           set -euo pipefail
