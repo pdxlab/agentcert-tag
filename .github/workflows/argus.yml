@@ -37,10 +37,10 @@ permissions:
   id-token: write
 
 concurrency:
-  # Jayesh #3 round-2 review (ans-registry parity) — ``inputs.pr`` FIRST:
-  # on a ``workflow_dispatch`` run the other two are both unset, so leaving
-  # it last resolves the whole expression to ``""`` and every manual
-  # dispatch joins the same empty-string group, cancelling each other.
+  # ``inputs.pr`` FIRST: on a ``workflow_dispatch`` run the other two are
+  # both unset, so leaving it last resolves the whole expression to ``""``
+  # and every manual dispatch joins the same empty-string group,
+  # cancelling each other.
   group: argus-${{ inputs.pr || github.event.pull_request.number || github.event.issue.number }}
   # Cancel only superseded pull_request runs. NOT for issue_comment: Argus
   # posting its own review fires a new issue_comment event, and because this
@@ -81,7 +81,6 @@ jobs:
         contains(github.event.comment.body, '@argus'))
     runs-on: ubuntu-latest
     steps:
-      # Jayesh #3 round-2 review (ans-registry parity) —
       # AUTHENTICATION IS NOT AUTHORIZATION. The job guard above admits
       # OWNER / MEMBER / COLLABORATOR via ``author_association``, but
       # those are RELATIONSHIP labels, not permissions: a read-only org
@@ -113,14 +112,14 @@ jobs:
                exit 1 ;;
           esac
 
-      # Jayesh #3 review — check out the BASE branch, not the PR's merge
-      # commit, so ``.argus/`` (prompts, allow_approve, accepted-patterns)
-      # is read from main. A PR that edits ``.argus/`` would otherwise be
-      # reviewed by its own edits, including a self-raised
-      # ``allow_approve: true`` or an accepted-patterns suppression of
-      # whatever the PR is doing. ``persist-credentials: false`` keeps the
-      # checkout token out of ``.git/config`` so a tool run later in the
-      # job can't reach back and push.
+      # Check out the BASE branch, not the PR's merge commit, so
+      # ``.argus/`` (prompts, ``allow_approve``, accepted-patterns) is read
+      # from main. A PR that edits ``.argus/`` would otherwise be reviewed
+      # by its own edits, including a self-raised ``allow_approve: true``
+      # or an accepted-patterns suppression of whatever the PR is doing.
+      # ``persist-credentials: false`` is defense in depth; the real
+      # scope-limiter is the explicit ``github_token`` below (contents:
+      # read, pull-requests: write only).
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.base.sha || github.event.repository.default_branch }}
@@ -138,14 +137,16 @@ jobs:
         id: argus_start
         run: echo "ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
-      # Jayesh #3 review — pin ``claude-code-action`` to a SHA (``@v1`` is
-      # a moving tag; resolved to one SHA on 10-21, a different one today),
-      # and pass ``github_token`` explicitly so the model operates with the
-      # job's GITHUB_TOKEN limited by this workflow's ``permissions:``
-      # block, rather than the Claude GitHub App's broader installation
-      # token (which can write ``contents``, ``workflows``, ``actions``).
+      # Pin ``claude-code-action`` to a release COMMIT (``@v1`` is a moving
+      # tag; it was retagged on 10-31 and 11-03, and the earlier annotated-
+      # tag-object pin resolved by the API to "No commit found" after the
+      # next release). ``github_token`` is passed explicitly so the model
+      # operates with the job's GITHUB_TOKEN limited by this workflow's
+      # ``permissions:`` block, rather than the Claude GitHub App's broader
+      # installation token (which can write ``contents``, ``workflows``,
+      # ``actions``).
       - name: Run Argus
-        uses: anthropics/claude-code-action@6460fb2cfde6004aeef0deff61b7f77a4cd1fc96 # v1 as of 2026-11-03
+        uses: anthropics/claude-code-action@4845bacbb38b3c4b15d948f035349786f678e068 # v1.0.267
         env:
           # Foundry DEPLOYMENT names (not model families). Both exist in the
           # account above: the reviewer runs on the Sonnet tier, and Claude Code
@@ -185,27 +186,26 @@ jobs:
       # clean and posted nothing at all. Each time the only signal was green.
       # Turn a silent no-review into a red check.
       #
-      # Exception: claude-code-action refuses to run when argus.yml differs from
-      # the copy on the default branch, so a PR that edits argus.yml legitimately
-      # gets no review. Skip the guard there instead of always failing it.
+      # Runs on every event — including PRs that edit this file. An earlier
+      # revision carried an exception for argus.yml-touching PRs on the
+      # grounds that claude-code-action "refused to run" when the workflow
+      # differed from the default branch's copy. That refusal came from the
+      # app-token exchange (``workflow_not_found_on_default_branch``), and
+      # the explicit ``github_token`` above skips that exchange — so those
+      # PRs now DO get a review, and the exception would turn a missing
+      # review back into a green check, which is the TRUS-1955 failure.
       - name: Fail if Argus posted no review
         if: always() && github.event_name != 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
-          # Jayesh #3 round-2 review (ans-registry parity) — ``inputs.pr``
-          # first for the same reason as ``concurrency.group`` above.
+          # ``inputs.pr`` first for the same reason as ``concurrency.group``
+          # above — on a workflow_dispatch the other two are unset.
           PR: ${{ inputs.pr || github.event.pull_request.number || github.event.issue.number }}
           SINCE: ${{ steps.argus_start.outputs.ts }}
         run: |
           set -euo pipefail
-          if gh pr diff "$PR" --name-only | grep -qx '.github/workflows/argus.yml'; then
-            echo "::notice::This PR edits argus.yml, so claude-code-action will not run. No review expected."
-            exit 0
-          fi
-          # Jayesh #3 review — with ``github_token: ${{ github.token }}``
-          # above, Argus posts reviews as ``github-actions[bot]``, not
-          # ``claude[bot]``. The pre-fix filter would never see the posted
-          # review and would fail the check even on a clean run.
+          # With ``github_token: ${{ github.token }}`` above, Argus posts
+          # reviews as ``github-actions[bot]``, not ``claude[bot]``.
           n=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/reviews" --paginate \
                 | jq --arg since "$SINCE" '[.[]
                     | select(.user.login == "github-actions[bot]")
