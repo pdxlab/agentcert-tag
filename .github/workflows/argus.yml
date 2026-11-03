@@ -77,9 +77,19 @@ jobs:
         contains(github.event.comment.body, '@argus'))
     runs-on: ubuntu-latest
     steps:
+      # Jayesh #3 review — check out the BASE branch, not the PR's merge
+      # commit, so ``.argus/`` (prompts, allow_approve, accepted-patterns)
+      # is read from main. A PR that edits ``.argus/`` would otherwise be
+      # reviewed by its own edits, including a self-raised
+      # ``allow_approve: true`` or an accepted-patterns suppression of
+      # whatever the PR is doing. ``persist-credentials: false`` keeps the
+      # checkout token out of ``.git/config`` so a tool run later in the
+      # job can't reach back and push.
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.repository.default_branch }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Azure login (OIDC — no stored credential)
         uses: azure/login@v2
@@ -92,8 +102,14 @@ jobs:
         id: argus_start
         run: echo "ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
+      # Jayesh #3 review — pin ``claude-code-action`` to a SHA (``@v1`` is
+      # a moving tag; resolved to one SHA on 10-21, a different one today),
+      # and pass ``github_token`` explicitly so the model operates with the
+      # job's GITHUB_TOKEN limited by this workflow's ``permissions:``
+      # block, rather than the Claude GitHub App's broader installation
+      # token (which can write ``contents``, ``workflows``, ``actions``).
       - name: Run Argus
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@6460fb2cfde6004aeef0deff61b7f77a4cd1fc96 # v1 as of 2026-11-03
         env:
           # Foundry DEPLOYMENT names (not model families). Both exist in the
           # account above: the reviewer runs on the Sonnet tier, and Claude Code
@@ -103,6 +119,7 @@ jobs:
           ANTHROPIC_DEFAULT_HAIKU_MODEL: claude-haiku-4-5
         with:
           use_foundry: "true"
+          github_token: ${{ github.token }}
           prompt: |
             You are **Argus**, this repository's automated PR reviewer.
             Review pull request #${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}.
@@ -147,9 +164,13 @@ jobs:
             echo "::notice::This PR edits argus.yml, so claude-code-action will not run. No review expected."
             exit 0
           fi
+          # Jayesh #3 review — with ``github_token: ${{ github.token }}``
+          # above, Argus posts reviews as ``github-actions[bot]``, not
+          # ``claude[bot]``. The pre-fix filter would never see the posted
+          # review and would fail the check even on a clean run.
           n=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/reviews" --paginate \
                 | jq --arg since "$SINCE" '[.[]
-                    | select(.user.login == "claude[bot]")
+                    | select(.user.login == "github-actions[bot]")
                     | select(.submitted_at >= $since)
                     | select((.body | length) > 0)] | length')
           if [ "${n:-0}" -eq 0 ]; then
