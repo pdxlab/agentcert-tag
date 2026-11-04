@@ -37,10 +37,6 @@ permissions:
   id-token: write
 
 concurrency:
-  # ``inputs.pr`` FIRST: on a ``workflow_dispatch`` run the other two are
-  # both unset, so leaving it last resolves the whole expression to ``""``
-  # and every manual dispatch joins the same empty-string group,
-  # cancelling each other.
   group: argus-${{ inputs.pr || github.event.pull_request.number || github.event.issue.number }}
   # Cancel only superseded pull_request runs. NOT for issue_comment: Argus
   # posting its own review fires a new issue_comment event, and because this
@@ -176,9 +172,39 @@ jobs:
             7. Post ONE consolidated review per `.argus/prompts/verdict.md`:
                request-changes on a confirmed blocker/major; else comment. Only
                approve if `verdict.allow_approve: true` AND the change is genuinely
-               clean AND the author is not a bot.
+               clean AND the author is not a bot. Pass the review body as a
+               single quoted `--body "<text>"` string — `--body-file`, `-F`,
+               `cat <<EOF`, and process substitutions are denied by this
+               workflow's `settings` block to close a file-exfil path.
           claude_args: >-
             --model claude-sonnet-4-6 --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh pr comment:*),Read,Grep,Glob"
+          # Keep the model inside the checkout. Bare ``Read`` / ``Grep`` /
+          # ``Glob`` in ``allowedTools`` would otherwise reach every file on
+          # the runner, including the Azure CLI token cache that
+          # ``azure/login`` writes under the runner's home directory. A
+          # prompt-injection smuggled in a PR diff or comment then only has
+          # to persuade the model to read the cache and post it in a review.
+          # ``blockReadsOutsideWorkingDirectories`` overrides the allowed
+          # ``Read`` rule in every permission mode (per Claude Code's
+          # permissions docs) and needs Claude Code >= 2.1.257 — this
+          # ``claude-code-action`` version installs 2.1.317.
+          # The explicit deny rules close the matching exfil path through
+          # ``gh pr review/comment --body-file <path>`` and ``-F <path>``.
+          # The space before ``-F`` is deliberate — bare ``*-F*`` would also
+          # refuse a review that quotes ``grep -F`` or mentions
+          # ``X-Forwarded-For``.
+          settings: |
+            {
+              "permissions": {
+                "blockReadsOutsideWorkingDirectories": true,
+                "deny": [
+                  "Bash(gh pr review*--body-file*)",
+                  "Bash(gh pr review* -F*)",
+                  "Bash(gh pr comment*--body-file*)",
+                  "Bash(gh pr comment* -F*)"
+                ]
+              }
+            }
 
       # A green "Argus Review" check is not proof a review happened. That has
       # bitten three separate ways (TRUS-1955): an approval with an empty body,
@@ -195,11 +221,16 @@ jobs:
       # PRs now DO get a review, and the exception would turn a missing
       # review back into a green check, which is the TRUS-1955 failure.
       - name: Fail if Argus posted no review
-        if: always() && github.event_name != 'workflow_dispatch'
+        # ``steps.argus_start.outcome == 'success'`` limits this to runs
+        # where Argus actually started. Without it, a refused commenter
+        # (``Verify the commenter can actually write here`` exits non-zero)
+        # or a failed Azure login still triggers this guard under
+        # ``always()`` with an empty ``SINCE``, which either counts older
+        # reviews as fresh or reports "finished but posted no review" for
+        # a run that never got that far.
+        if: always() && steps.argus_start.outcome == 'success' && github.event_name != 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
-          # ``inputs.pr`` first for the same reason as ``concurrency.group``
-          # above — on a workflow_dispatch the other two are unset.
           PR: ${{ inputs.pr || github.event.pull_request.number || github.event.issue.number }}
           SINCE: ${{ steps.argus_start.outputs.ts }}
         run: |
