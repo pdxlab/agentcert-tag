@@ -1,6 +1,6 @@
 image:
   repository: ghcr.io/pdxlab/agentcert-tag/mcp-trust-proxy
-  tag: latest
+  tag: "0.1.1"
   pullPolicy: IfNotPresent
 replicaCount: 2
 service:
@@ -8,7 +8,7 @@ service:
   port: 8081
 mode: shadow                 # shadow | enforce
 upstream: ""                 # single-upstream URL; or use `config` for multi
-anchorsPem: ""               # trust-anchor bundle (PEM); mounted at /anchors/anchors.pem
+anchorsPem: ""               # trust-anchor bundle (PEM); mounted at /anchors/roots.pem
 config: {}                   # full config object (multi-upstream, guardrails); overrides `upstream`
 resources:
   requests: { cpu: 50m, memory: 64Mi }

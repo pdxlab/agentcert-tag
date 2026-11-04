@@ -12,6 +12,6 @@ apiVersion: v1
 kind: ConfigMap
 metadata: { name: {{ .Release.Name }}-mcp-trust-proxy-anchors }
 data:
-  anchors.pem: |
+  roots.pem: |
 {{ .Values.anchorsPem | indent 4 }}
 {{- end }}

@@ -19,3 +19,22 @@ jobs:
           sudo apt-get update && sudo apt-get install -y luarocks >/dev/null
           sudo luarocks install luacheck >/dev/null
           luacheck kong/ --no-max-line-length --globals kong ngx || true
+  proxy-release-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install jsonschema
+      - name: Validate registry metadata
+        run: |
+          set -euo pipefail
+          python scripts/verify-proxy-release.py
+          curl --fail --silent --show-error --location https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json -o /tmp/server.schema.json
+          python -c 'import json,jsonschema; jsonschema.validate(json.load(open("proxy/server.json")), json.load(open("/tmp/server.schema.json")))'
+      - name: Check built image ownership label
+        run: |
+          set -euo pipefail
+          docker build -f proxy/Dockerfile -t proxy-review .
+          actual=$(docker image inspect --format '{{ index .Config.Labels "io.modelcontextprotocol.server.name" }}' proxy-review)
+          test "$actual" = "io.github.pdxlab/mcp-trust-proxy"

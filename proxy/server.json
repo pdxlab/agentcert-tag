@@ -8,13 +8,16 @@
     "source": "github",
     "subfolder": "proxy"
   },
-  "version": "0.1.0",
+  "version": "0.1.1",
   "websiteUrl": "https://trustmodel.ai/verify",
   "packages": [
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/pdxlab/agentcert-tag/mcp-trust-proxy:0.1.0",
-      "transport": { "type": "streamable-http", "url": "http://localhost:8081" },
+      "identifier": "ghcr.io/pdxlab/agentcert-tag/mcp-trust-proxy:0.1.1",
+      "transport": {
+        "type": "streamable-http",
+        "url": "http://localhost:8081"
+      },
       "runtimeArguments": [
         {
           "type": "named",

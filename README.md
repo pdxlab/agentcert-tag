@@ -27,7 +27,7 @@ default**, ~0.4 ms added per verify
 docker run -p 8081:8081 \
   -e MCP_PROXY_UPSTREAM=http://your-mcp-server:9000/mcp \
   -e TAG_ANCHORS_PEM=/anchors/roots.pem -v $PWD/anchors:/anchors:ro \
-  ghcr.io/pdxlab/agentcert-tag/mcp-trust-proxy:0.1.0
+  ghcr.io/pdxlab/agentcert-tag/mcp-trust-proxy:0.1.1
 # point your MCP client at http://localhost:8081 instead of the server
 ```
 
@@ -124,3 +124,5 @@ v0.1 — reference core + Kong plugin + sidecar + demo. Cisco Firepower module,
 hosted sandbox, and Kong Plugin Hub listing are tracked in TRUS-1806.
 
 MIT licensed.
+
+Proxy release procedure: [Publishing](proxy/PUBLISHING.md). Version 0.1.1 requires the release workflow to complete before use.
