@@ -3,7 +3,7 @@ package = "kong-plugin-agentcert-tag"
 version = "0.2.0-1"
 source = {
   url = "git+https://github.com/pdxlab/agentcert-tag.git",
-  tag = "v0.2.0",
+  tag = "kong-v0.2.0",
 }
 description = {
   summary = "TAG — verify TrustModel AgentCert + TrustScore in Kong",
