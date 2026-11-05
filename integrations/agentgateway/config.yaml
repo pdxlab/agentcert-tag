@@ -33,7 +33,6 @@ binds:
                     includeRequestHeaders:
                       - x-agent-cert
                       - x-agent-cert-proof
-                      - x-agent-cert-carriage
                       - x-agent-id
                     # surface the verdict onto the upstream request so your own
                     # policy/logs can act on it. 200 from the sidecar = allow.

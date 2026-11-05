@@ -100,8 +100,7 @@ spec:
     # Authorization, so the x-agent-cert* headers must be listed explicitly.
     headersToExtAuth:
       - x-agent-cert           # base64 PEM leaf (the AgentCert)
-      - x-agent-cert-proof     # stapled proof-of-possession (for header carriage)
-      - x-agent-cert-carriage  # "header" (default) or "mtls"
+      - x-agent-cert-proof     # signed proof-of-possession JSON (required)
       - x-agent-id             # claimed ANS id, cross-checked to the cert SAN
     http:
       backendRefs:

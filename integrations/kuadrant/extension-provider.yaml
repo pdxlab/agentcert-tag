@@ -25,7 +25,6 @@ data:
         # cert the caller presents + the claimed agent id → forwarded to TAG
         includeRequestHeadersInCheck:
         - x-agent-cert
-        - x-agent-cert-carriage
         - x-agent-cert-proof
         - x-agent-id
         - x-agent-cert-audience
