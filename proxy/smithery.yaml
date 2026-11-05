@@ -1,0 +1,51 @@
+# Smithery listing for the MCP Trust Proxy (TRUS-2236).
+#
+# Lets a Smithery user drop a TrustModel trust layer in front of any MCP server
+# with no code: Smithery builds proxy/Dockerfile and runs the proxy, which
+# forwards to their upstream and verifies AgentCert + TrustScore per tools/call.
+# Shadow by default (TAG_MODE=shadow) so adding it blocks nothing until the
+# operator flips to enforce. The actual listing is published registry-side on
+# Smithery; this file is the deploy + config contract it reads.
+runtime: "container"
+
+build:
+  # Dockerfile + build context are relative to this file's directory (proxy/).
+  # The image COPYs core/ and proxy/ from the repo root, so build from the root.
+  dockerfile: "Dockerfile"
+  dockerBuildPath: "../"
+
+startCommand:
+  type: "http"
+  # Maps Smithery's per-session config to the proxy's env (see proxy/README.md).
+  configSchema:
+    type: object
+    required: ["upstream"]
+    properties:
+      upstream:
+        type: string
+        title: "Upstream MCP server URL"
+        description: "The MCP server to put the trust layer in front of, e.g. http://host:9000/mcp"
+      mode:
+        type: string
+        enum: ["shadow", "enforce"]
+        default: "shadow"
+        description: "shadow = verify + log, block nothing (default); enforce = block on fail"
+      failMode:
+        type: string
+        enum: ["closed", "open"]
+        default: "closed"
+        description: "On a verification error: closed = deny (default), open = allow"
+      minServerScore:
+        type: integer
+        default: 0
+        description: "Block the upstream if its TrustScore is below this (0 = off)"
+      trustIndexUrl:
+        type: string
+        default: "https://api.trustmodel.ai"
+        description: "Trust Index API base used for live upstream scores"
+  exampleConfig:
+    upstream: "http://your-mcp-server:9000/mcp"
+    mode: "shadow"
+    failMode: "closed"
+    minServerScore: 0
+    trustIndexUrl: "https://api.trustmodel.ai"

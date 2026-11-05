@@ -1,0 +1,52 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-07-09/server.schema.json",
+  "name": "io.github.pdxlab/mcp-trust-proxy",
+  "description": "Drop a TrustModel trust layer in front of any MCP server — verifies the caller's AgentCert + TrustScore inbound and scores the upstream outbound, per tools/call. Shadow by default; ~0.4 ms added per verify.",
+  "repository": {
+    "url": "https://github.com/pdxlab/agentcert-tag",
+    "source": "github",
+    "subfolder": "proxy"
+  },
+  "version": "0.2.0",
+  "websiteUrl": "https://trustmodel.ai",
+  "packages": [
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/pdxlab/agentcert-tag/mcp-trust-proxy",
+      "version": "0.2.0",
+      "transport": { "type": "streamable-http", "url": "http://localhost:8081" },
+      "environmentVariables": [
+        {
+          "name": "MCP_PROXY_UPSTREAM",
+          "description": "The MCP server to front, e.g. http://host:9000/mcp",
+          "isRequired": true,
+          "format": "string"
+        },
+        {
+          "name": "TAG_MODE",
+          "description": "shadow (verify + log, block nothing — default) or enforce",
+          "default": "shadow",
+          "format": "string"
+        },
+        {
+          "name": "TAG_FAIL_MODE",
+          "description": "On a verification error: closed (deny, default) or open",
+          "default": "closed",
+          "format": "string"
+        },
+        {
+          "name": "MCP_PROXY_TRUST_INDEX_URL",
+          "description": "Trust Index API base for live upstream scores",
+          "default": "https://api.trustmodel.ai",
+          "format": "string"
+        }
+      ]
+    },
+    {
+      "registryType": "pypi",
+      "identifier": "trustmodel-agentcert-tag",
+      "version": "0.2.0",
+      "transport": { "type": "streamable-http", "url": "http://localhost:8081" }
+    }
+  ]
+}

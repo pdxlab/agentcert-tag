@@ -49,4 +49,12 @@ thresholds, `trust_index_url` for live server scores, and guardrail deny-pattern
 | `TAG_ANCHORS_PEM` | trust-anchor bundle for cert-chain validation |
 | `TRUSTMODEL_BASE_URL` | live Reputation/CRL backend (else offline cert-baked scores) |
 
+## Performance — the trust tax
+A full AgentCert verification adds **~0.4 ms single-request** (low-single-digit ms
+under load); an unverified call is nearly free. Reproducible harness, published
+numbers, charts, and the optimization roadmap live in a dedicated repo:
+**[mcp-trust-proxy-benchmarking](https://github.com/pdxlab/mcp-trust-proxy-benchmarking)**.
+A co-located dev harness is also here: [`benchmarks/`](benchmarks/README.md)
+(`python proxy/benchmarks/bench.py`).
+
 Security: [`THREAT_MODEL.md`](THREAT_MODEL.md).

@@ -1,0 +1,15 @@
+{
+  "file_list": [
+    "verify.js"
+  ],
+  "custom_middleware": {
+    "driver": "otto",
+    "auth_check": {
+      "name": "agentCertAuthCheck",
+      "path": "verify.js",
+      "require_session": false
+    }
+  },
+  "checksum": "",
+  "signature": ""
+}

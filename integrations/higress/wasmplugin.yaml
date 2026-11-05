@@ -1,0 +1,43 @@
+# TAG — AgentCert + TrustScore verification for Higress via the native `ext-auth`
+# wasm plugin. This is config, not code (the path maintainer johnlanni preferred
+# in higress#4784): Higress calls the TAG verify sidecar over HTTP and the sidecar
+# does the crypto. Shadow-mode by default — run the sidecar with TAG_MODE=shadow
+# and it returns 200/allow on every request, so nothing is blocked on day one.
+#
+# Deploy the sidecar as a Service `tag-sidecar` on :8080 first (see README).
+#
+# NOTE: forward_auth mode (fixed path) is used on purpose — the TAG sidecar matches
+# /ext_authz EXACTLY, so Envoy-style path_prefix (which appends the request path)
+# would miss.
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: agentcert-ext-auth
+  namespace: higress-system
+spec:
+  # Pin to the current ext-auth plugin build from the Higress plugin registry.
+  url: oci://higress-registry.cn-hangzhou.cr.aliyuncs.com/plugins/ext-auth:1.0.0
+  phase: AUTHN
+  priority: 360
+  defaultConfig:
+    http_service:
+      endpoint_mode: forward_auth
+      endpoint:
+        service_name: tag-sidecar.default.svc.cluster.local
+        service_port: 8080
+        path: /ext_authz
+        request_method: GET
+      timeout: 1000
+      authorization_request:
+        allowed_headers:
+          - exact: x-agent-cert
+          - exact: x-agent-cert-proof
+          - exact: x-agent-cert-carriage
+          - exact: x-agent-id
+      authorization_response:
+        # inject the verdict onto the upstream request (200 from sidecar = allow)
+        allowed_upstream_headers:
+          - prefix: x-agentcert-
+    # observe-first: if the verifier is unreachable, allow (pairs with sidecar
+    # shadow mode). Set false + TAG_MODE=enforce to actually block.
+    failure_mode_allow: true
