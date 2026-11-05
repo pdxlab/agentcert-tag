@@ -1,40 +1,62 @@
 name: publish-proxy
 
-# Builds the MCP Trust Proxy image and pushes it to GHCR
-# (ghcr.io/pdxlab/agentcert-tag/mcp-trust-proxy). No stored credential.
-
+# Python v* and Kong kong-v* releases must never publish proxy images.
 on:
-  release:
-    types: [published]
-  workflow_dispatch:
+  push:
+    tags: ['proxy-v*']
 
 permissions:
   contents: read
   packages: write
+
+concurrency:
+  group: publish-proxy-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build-push:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate release identity and source
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor HEAD origin/main
+          python scripts/verify-proxy-release.py "$RELEASE_TAG"
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Refuse to overwrite a published version
+        run: python scripts/verify-proxy-release.py --require-unpublished
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}/mcp-trust-proxy
+          images: ghcr.io/pdxlab/agentcert-tag/mcp-trust-proxy
+          flavor: latest=false
           tags: |
-            type=raw,value=latest
-            type=raw,value=0.1.0
-            type=ref,event=tag
+            type=match,pattern=proxy-v(\d+\.\d+\.\d+),group=1
       - uses: docker/build-push-action@v6
         with:
           context: .
           file: proxy/Dockerfile
-          push: true
+          load: true
+          push: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+      - name: Verify ownership label before publishing
+        run: |
+          set -euo pipefail
+          image=$(python -c 'import json; print(json.load(open("proxy/server.json"))["packages"][0]["identifier"])')
+          expected=$(python -c 'import json; print(json.load(open("proxy/server.json"))["name"])')
+          actual=$(docker image inspect --format '{{ index .Config.Labels "io.modelcontextprotocol.server.name" }}' "$image")
+          test "$actual" = "$expected"
+          docker push "$image"
+      - name: Verify published image ownership
+        run: python scripts/verify-proxy-release.py --verify-published

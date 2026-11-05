@@ -20,7 +20,7 @@ spec:
             - { name: MCP_PROXY_UPSTREAM, value: {{ .Values.upstream | quote }} }
             {{- end }}
             {{- if .Values.anchorsPem }}
-            - { name: TAG_ANCHORS_PEM, value: /anchors/anchors.pem }
+            - { name: TAG_ANCHORS_PEM, value: /anchors/roots.pem }
             {{- end }}
           readinessProbe: { httpGet: { path: /healthz, port: {{ .Values.service.port }} } }
           resources: {{ .Values.resources | toYaml | nindent 12 }}

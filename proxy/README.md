@@ -18,12 +18,12 @@ to import, just a hop in front.
 
 **Shadow by default** (decide + log, block nothing). Set `TAG_MODE=enforce` to block.
 
-## Quickstart — one command
+## Quickstart — configure your trust anchors first
 ```bash
 docker run -p 8081:8081 \
   -e MCP_PROXY_UPSTREAM=http://your-mcp-server:9000/mcp \
-  -e TAG_ANCHORS_PEM=/anchors/anchors.pem -v $PWD/anchors:/anchors:ro \
-  ghcr.io/pdxlab/agentcert-tag/mcp-trust-proxy:latest
+  -e TAG_ANCHORS_PEM=/anchors/roots.pem -v $PWD/anchors:/anchors:ro \
+  ghcr.io/pdxlab/agentcert-tag/mcp-trust-proxy:0.1.1
 # point your MCP client at http://localhost:8081 instead of the server
 ```
 
@@ -58,3 +58,5 @@ A co-located dev harness is also here: [`benchmarks/`](benchmarks/README.md)
 (`python proxy/benchmarks/bench.py`).
 
 Security: [`THREAT_MODEL.md`](THREAT_MODEL.md).
+
+Proxy release procedure: [Publishing](PUBLISHING.md). Version 0.1.1 requires the release workflow to complete before use.
