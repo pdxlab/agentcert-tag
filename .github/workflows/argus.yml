@@ -1,0 +1,249 @@
+name: Argus Review
+
+# Argus PR reviewer (TRUS-1647) — vendored under .argus/ (from karlmehta/argus).
+# Reviews across security, data-protection, correctness, concurrency, performance,
+# api-compat, tests, observability, dependencies; posts one severity-ranked review.
+# To update skills/prompts, re-vendor from karlmehta/argus@v1.
+#
+# AUTH: Microsoft Foundry via Azure OIDC. No Anthropic API key is stored here —
+# azure/login exchanges GitHub's short-lived OIDC token for an Azure token and
+# claude-code-action calls Foundry with it. Nothing to rotate. The verdict policy
+# still comes from .argus/config/argus.yml, unchanged by this commit.
+
+on:
+  # Auto-review on open / reopen / ready-for-review, plus on-demand via an
+  # '@argus' comment. Deliberately NOT on 'synchronize': re-reviewing every push
+  # is the cost problem #503 fixed. Push fixes, then comment '@argus'.
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+  # On-demand against a chosen PR. Needed because `pull_request` deliberately
+  # omits 'synchronize', so a push does not re-trigger; without this the only
+  # ways to re-run were an '@argus' comment or close/reopen. `required` closes
+  # the empty-PR path: the trigger and the job guard admit workflow_dispatch,
+  # but the Run step below needs an actual PR number to resolve.
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: PR number to review
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: read
+  id-token: write
+
+concurrency:
+  group: argus-${{ inputs.pr || github.event.pull_request.number || github.event.issue.number }}
+  # Cancel only superseded pull_request runs. NOT for issue_comment: Argus
+  # posting its own review fires a new issue_comment event, and because this
+  # concurrency group is workflow-level while the bot guard is a job-level
+  # `if:`, that run joins the group and cancels the still-finishing original
+  # BEFORE the guard can skip it — silently losing a completed review.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  review:
+    # Team-invokable, auto-reviewing.
+    #
+    # UNCHANGED from the #528 lock-down, and the part that actually mattered:
+    # Argus cannot merge — no `gh pr merge` in allowedTools, no
+    # automerge workflow in this repo, and repo-level allow_auto_merge is false.
+    # The auto-approve + auto-merge loop behind the #528 incident stays
+    # impossible three ways over.
+    #
+    # CHANGED (TRUS-1955): this repo now matches the other seven. Any human with
+    # write access can comment '@argus', and PRs are auto-reviewed on open /
+    # reopen / ready-for-review. Previously Argus was installed here but pinned
+    # to the owner and never ran on its own, so it was dormant in practice.
+    # The #528 incident was an auto-approve + auto-MERGE loop; auto-review was
+    # never the cause, and the merge path stays closed. Bots are excluded —
+    # claude-code-action hard-fails on a bot-initiated run, and it stops Argus's
+    # own comment from retriggering it.
+    if: >
+      (github.event_name == 'workflow_dispatch' &&
+        github.actor != 'dependabot[bot]') ||
+      (github.event_name == 'pull_request' &&
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.user.type != 'Bot' &&
+        github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request != null &&
+        github.event.comment.user.type != 'Bot' &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
+        contains(github.event.comment.body, '@argus'))
+    runs-on: ubuntu-latest
+    steps:
+      # AUTHENTICATION IS NOT AUTHORIZATION. The job guard above admits
+      # OWNER / MEMBER / COLLABORATOR via ``author_association``, but
+      # those are RELATIONSHIP labels, not permissions: a read-only org
+      # member commenting on a PR is still ``MEMBER``. This job runs in
+      # the default-branch context with ``id-token: write`` and
+      # ``pull-requests: write``, so the comment that starts it is an
+      # authorization boundary and has to be checked as one.
+      #
+      # On a trust-boundary repo (TAG verifier) we check it explicitly.
+      #
+      # ACTOR is passed through env, never interpolated into the shell
+      # script: a login is attacker-influenced text and ``${{ }}``
+      # inside a ``run:`` is substituted BEFORE bash parses it, so a
+      # crafted login name would land as shell. The env path makes the
+      # value an opaque variable to bash.
+      - name: Verify the commenter can actually write here
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.event.comment.user.login }}
+        run: |
+          set -euo pipefail
+          perm=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" \
+                   --jq '.permission')
+          echo "$ACTOR has '$perm' on $GITHUB_REPOSITORY"
+          case "$perm" in
+            admin|maintain|write) ;;
+            *) echo "::error::$ACTOR does not have write access to this repository; refusing to run a privileged review job."
+               exit 1 ;;
+          esac
+
+      # Check out the BASE branch, not the PR's merge commit, so
+      # ``.argus/`` (prompts, ``allow_approve``, accepted-patterns) is read
+      # from main. A PR that edits ``.argus/`` would otherwise be reviewed
+      # by its own edits, including a self-raised ``allow_approve: true``
+      # or an accepted-patterns suppression of whatever the PR is doing.
+      # ``persist-credentials: false`` is defense in depth; the real
+      # scope-limiter is the explicit ``github_token`` below (contents:
+      # read, pull-requests: write only).
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Azure login (OIDC — no stored credential)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_ARGUS }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID_QA }}
+
+      - name: Record start time
+        id: argus_start
+        run: echo "ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      # Pin ``claude-code-action`` to a release COMMIT (``@v1`` is a moving
+      # tag; it was retagged on 10-31 and 11-03, and the earlier annotated-
+      # tag-object pin resolved by the API to "No commit found" after the
+      # next release). ``github_token`` is passed explicitly so the model
+      # operates with the job's GITHUB_TOKEN limited by this workflow's
+      # ``permissions:`` block, rather than the Claude GitHub App's broader
+      # installation token (which can write ``contents``, ``workflows``,
+      # ``actions``).
+      - name: Run Argus
+        uses: anthropics/claude-code-action@4845bacbb38b3c4b15d948f035349786f678e068 # v1.0.267
+        env:
+          # Foundry DEPLOYMENT names (not model families). Both exist in the
+          # account above: the reviewer runs on the Sonnet tier, and Claude Code
+          # uses the Haiku tier for small/background calls.
+          ANTHROPIC_FOUNDRY_RESOURCE: aif-trustmodel-qa
+          ANTHROPIC_DEFAULT_SONNET_MODEL: claude-sonnet-4-6
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: claude-haiku-4-5
+        with:
+          use_foundry: "true"
+          github_token: ${{ github.token }}
+          prompt: |
+            You are **Argus**, this repository's automated PR reviewer.
+            Review pull request #${{ inputs.pr || github.event.pull_request.number || github.event.issue.number }}.
+
+            1. Read `.argus/prompts/system.md` (persona + hard rules — you never
+               approve merely to clear a gate).
+            2. Read `.argus/config/argus.yml` (enabled skills, severity gate, path
+               skip/strict rules, limits).
+            3. Load each enabled skill from `.argus/skills/<name>.md`.
+            4. Load repo memory: `.argus/memory/conventions.md`,
+               `.argus/memory/accepted-patterns.md`, relevant `.argus/memory/knowledge/*`.
+               Treat accepted-patterns as authoritative — do not re-flag them.
+            5. `gh pr diff ${{ inputs.pr || github.event.pull_request.number || github.event.issue.number }}`;
+               read surrounding code before judging.
+            6. Apply each skill, reconcile with memory, dedupe, rank by severity,
+               and calibrate (cut low-confidence findings) per `.argus/prompts/review.md`.
+            7. Post ONE consolidated review per `.argus/prompts/verdict.md`:
+               request-changes on a confirmed blocker/major; else comment. Only
+               approve if `verdict.allow_approve: true` AND the change is genuinely
+               clean AND the author is not a bot. Pass the review body as a
+               single quoted `--body "<text>"` string — `--body-file`, `-F`,
+               `cat <<EOF`, and process substitutions are denied by this
+               workflow's `settings` block to close a file-exfil path.
+          claude_args: >-
+            --model claude-sonnet-4-6 --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh pr comment:*),Read,Grep,Glob"
+          # Keep the model inside the checkout. Bare ``Read`` / ``Grep`` /
+          # ``Glob`` in ``allowedTools`` would otherwise reach every file on
+          # the runner, including the Azure CLI token cache that
+          # ``azure/login`` writes under the runner's home directory. A
+          # prompt-injection smuggled in a PR diff or comment then only has
+          # to persuade the model to read the cache and post it in a review.
+          # ``blockReadsOutsideWorkingDirectories`` overrides the allowed
+          # ``Read`` rule in every permission mode (per Claude Code's
+          # permissions docs) and needs Claude Code >= 2.1.257 — this
+          # ``claude-code-action`` version installs 2.1.317.
+          # The explicit deny rules close the matching exfil path through
+          # ``gh pr review/comment --body-file <path>`` and ``-F <path>``.
+          # The space before ``-F`` is deliberate — bare ``*-F*`` would also
+          # refuse a review that quotes ``grep -F`` or mentions
+          # ``X-Forwarded-For``.
+          settings: |
+            {
+              "permissions": {
+                "blockReadsOutsideWorkingDirectories": true,
+                "deny": [
+                  "Bash(gh pr review*--body-file*)",
+                  "Bash(gh pr review* -F*)",
+                  "Bash(gh pr comment*--body-file*)",
+                  "Bash(gh pr comment* -F*)"
+                ]
+              }
+            }
+
+      # A green "Argus Review" check is not proof a review happened. That has
+      # bitten three separate ways (TRUS-1955): an approval with an empty body,
+      # a stub review pointing at a separate comment, and a run that finished
+      # clean and posted nothing at all. Each time the only signal was green.
+      # Turn a silent no-review into a red check.
+      #
+      # Runs on every event — including PRs that edit this file. An earlier
+      # revision carried an exception for argus.yml-touching PRs on the
+      # grounds that claude-code-action "refused to run" when the workflow
+      # differed from the default branch's copy. That refusal came from the
+      # app-token exchange (``workflow_not_found_on_default_branch``), and
+      # the explicit ``github_token`` above skips that exchange — so those
+      # PRs now DO get a review, and the exception would turn a missing
+      # review back into a green check, which is the TRUS-1955 failure.
+      - name: Fail if Argus posted no review
+        # ``steps.argus_start.outcome == 'success'`` limits this to runs
+        # where Argus actually started. Without it, a refused commenter
+        # (``Verify the commenter can actually write here`` exits non-zero)
+        # or a failed Azure login still triggers this guard under
+        # ``always()`` with an empty ``SINCE``, which either counts older
+        # reviews as fresh or reports "finished but posted no review" for
+        # a run that never got that far.
+        if: always() && steps.argus_start.outcome == 'success' && github.event_name != 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ inputs.pr || github.event.pull_request.number || github.event.issue.number }}
+          SINCE: ${{ steps.argus_start.outputs.ts }}
+        run: |
+          set -euo pipefail
+          # With ``github_token: ${{ github.token }}`` above, Argus posts
+          # reviews as ``github-actions[bot]``, not ``claude[bot]``.
+          n=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/reviews" --paginate \
+                | jq --arg since "$SINCE" '[.[]
+                    | select(.user.login == "github-actions[bot]")
+                    | select(.submitted_at >= $since)
+                    | select((.body | length) > 0)] | length')
+          if [ "${n:-0}" -eq 0 ]; then
+            echo "::error::Argus finished but posted no review with a body on #$PR. See TRUS-1955."
+            exit 1
+          fi
+          echo "Argus posted $n review(s) with a body on #$PR."
