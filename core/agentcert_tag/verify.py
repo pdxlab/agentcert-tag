@@ -309,6 +309,8 @@ class Verifier:
         except Exception as exc:
             return False, f"malformed proof: {exc}"
         now = time.time()
+        if not isinstance(claims, dict):
+            return False, "proof claims must be an object"
         exp, iat = claims.get("exp"), claims.get("iat")
         if not isinstance(exp, (int, float)) or now > exp:
             return False, "proof expired"

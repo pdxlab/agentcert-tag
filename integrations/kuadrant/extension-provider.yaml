@@ -25,10 +25,8 @@ data:
         # cert the caller presents + the claimed agent id → forwarded to TAG
         includeRequestHeadersInCheck:
         - x-agent-cert
-        - x-agent-cert-carriage
         - x-agent-cert-proof
         - x-agent-id
-        - x-agent-cert-audience
         # verdict TAG returns → surfaced to the upstream MCP server (+ logs).
         # in shadow mode TAG always allows, so these ride along on every call.
         headersToUpstreamOnAllow:

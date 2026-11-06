@@ -28,8 +28,7 @@ Config via env:
   TAG_CERT_HEADER          header carrying b64 PEM leaf  (default x-agent-cert)
   TAG_PROOF_HEADER         header carrying PoP assertion (default x-agent-cert-proof)
   TAG_AGENT_ID_HEADER      claimed agent id (optional)   (default x-agent-id)
-  TAG_AUDIENCE_HEADER      PoP audience (optional)       (default x-agent-cert-audience)
-  TAG_CARRIAGE_HEADER      header|mtls                   (default x-agent-cert-carriage)
+  TAG_POP_AUDIENCE         expected signed PoP audience (required in enforce mode)
   TAG_MIN_SCORE            enforce: require score >= N to allow (default: VERIFIED alone)
 """
 import base64
@@ -49,12 +48,19 @@ MODE = os.environ.get("TAG_MODE", Mode.SHADOW)
 FAIL = os.environ.get("TAG_FAIL_MODE", FailMode.CLOSED)
 
 # --- ext_authz endpoint config -------------------------------------------------
-EXTAUTHZ_PATH = os.environ.get("TAG_EXTAUTHZ_PATH", "/ext_authz")
+EXTAUTHZ_PATH = os.environ.get("TAG_EXTAUTHZ_PATH", "/ext_authz").rstrip("/")
+if not EXTAUTHZ_PATH.startswith("/") or EXTAUTHZ_PATH == "":
+    raise ValueError("TAG_EXTAUTHZ_PATH must be a non-root absolute path")
 CERT_HEADER = os.environ.get("TAG_CERT_HEADER", "x-agent-cert").lower()
 PROOF_HEADER = os.environ.get("TAG_PROOF_HEADER", "x-agent-cert-proof").lower()
 AGENT_ID_HEADER = os.environ.get("TAG_AGENT_ID_HEADER", "x-agent-id").lower()
-AUDIENCE_HEADER = os.environ.get("TAG_AUDIENCE_HEADER", "x-agent-cert-audience").lower()
-CARRIAGE_HEADER = os.environ.get("TAG_CARRIAGE_HEADER", "x-agent-cert-carriage").lower()
+POP_AUDIENCE = os.environ.get("TAG_POP_AUDIENCE", "").strip() or None
+if POP_AUDIENCE is None:
+    if MODE == Mode.ENFORCE:
+        raise SystemExit("TAG_POP_AUDIENCE must be non-empty in enforce mode")
+    print("WARNING: TAG_POP_AUDIENCE is unset; shadow verification does not bind "
+          "proofs to this gateway. Configure a unique audience before enforcing.",
+          file=sys.stderr)
 _min = os.environ.get("TAG_MIN_SCORE")
 MIN_SCORE = int(_min) if _min not in (None, "") else None
 
@@ -105,7 +111,10 @@ def _pem_from_header(value):
         return None
     if "BEGIN CERTIFICATE" in value:
         return value.encode()
-    return base64.b64decode(value)
+    try:
+        return base64.b64decode(value, validate=True)
+    except (ValueError, TypeError):
+        return b""  # invalid credential, not a backend error eligible for fail-open
 
 
 def _would_allow(result):
@@ -156,6 +165,16 @@ class Handler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(body)
 
+    def _is_extauthz(self):
+        path = self.path.split("?", 1)[0]
+        return path == EXTAUTHZ_PATH or path.startswith(EXTAUTHZ_PATH + "/")
+
+    def __getattr__(self, name):
+        # Envoy forwards the original HTTP method, including extension methods.
+        if name.startswith("do_"):
+            return self.do_HEAD
+        raise AttributeError(name)
+
     # ---- ext_authz check (method-agnostic; cert rides in a header) ----------
     def _handle_extauthz(self):
         try:
@@ -177,12 +196,18 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, {"allow": True, "reason": "no credential (shadow/fail-open)"}, hdrs)
                 return self._send(403, {"allow": False, "reason": "no AgentCert presented"}, hdrs)
 
+            # This HTTP endpoint cannot attest to a downstream TLS handshake.
+            # Never let a forwarded carriage header disable proof-of-possession.
+            try:
+                proof = json.loads(get(PROOF_HEADER, "null"))
+            except (ValueError, TypeError):
+                proof = None
             result = VERIFIER.verify(
                 pem,
                 claimed_agent_id=get(AGENT_ID_HEADER),
-                carriage=get(CARRIAGE_HEADER, "header"),
-                proof=get(PROOF_HEADER),
-                audience=get(AUDIENCE_HEADER),
+                carriage="header",
+                proof=proof,
+                audience=POP_AUDIENCE,
             )
             would = _would_allow(result)
             hdrs = _verdict_headers(result, would)
@@ -202,17 +227,17 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/healthz":
             return self._send(200, {"ok": True, "mode": MODE, "version": VERIFIER.verifier_id,
                                     "extauthz_path": EXTAUTHZ_PATH})
-        if self.path.split("?")[0] == EXTAUTHZ_PATH:
+        if self._is_extauthz():
             return self._handle_extauthz()
         self._send(404, {"error": "not found"})
 
     def do_HEAD(self):
-        if self.path.split("?")[0] == EXTAUTHZ_PATH:
+        if self._is_extauthz():
             return self._handle_extauthz()
         self._send(404, {"error": "not found"})
 
     def do_POST(self):
-        if self.path.split("?")[0] == EXTAUTHZ_PATH:
+        if self._is_extauthz():
             return self._handle_extauthz()
         if self.path != "/verify":
             return self._send(404, {"error": "not found"})

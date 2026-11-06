@@ -39,6 +39,9 @@ spec:
         image: ghcr.io/pdxlab/agentcert-tag/sidecar:latest
         env:
         # shadow mode: decide + log, never block. Set to "enforce" to block.
+        # Agents must sign for this unique audience; required in enforce mode.
+        - name: TAG_POP_AUDIENCE
+          value: "https://envoy-gateway.example.com"
         - name: TAG_MODE
           value: "shadow"
         ports:
@@ -100,8 +103,7 @@ spec:
     # Authorization, so the x-agent-cert* headers must be listed explicitly.
     headersToExtAuth:
       - x-agent-cert           # base64 PEM leaf (the AgentCert)
-      - x-agent-cert-proof     # stapled proof-of-possession (for header carriage)
-      - x-agent-cert-carriage  # "header" (default) or "mtls"
+      - x-agent-cert-proof     # signed proof-of-possession JSON (required)
       - x-agent-id             # claimed ANS id, cross-checked to the cert SAN
     http:
       backendRefs:
