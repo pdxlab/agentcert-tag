@@ -33,6 +33,9 @@ spec:
           env:
             # shadow is the default — observe + log, never block. Flip to
             # "enforce" only after you've reviewed the shadow verdicts.
+            # Agents must sign for this unique audience; required in enforce mode.
+            - name: TAG_POP_AUDIENCE
+              value: "https://kuadrant.example.com"
             - name: TAG_MODE
               value: "shadow"
             # - name: TAG_MIN_SCORE   # optional enforce floor, e.g. "600"

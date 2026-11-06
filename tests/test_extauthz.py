@@ -52,11 +52,12 @@ def _fixture(score=812):
 
 @contextlib.contextmanager
 def _server(extra_env):
+    proof_audience = extra_env.pop("_proof_audience", "test-gateway")
     apath, spath, leaf_b64, leaf_key = _fixture(score=extra_env.pop("_score", 812))
     port = _free_port()
     env = dict(os.environ)
     env.update({"TAG_ANCHORS_PEM": apath, "TAG_SANDBOX_SEED": spath,
-                "TAG_PORT": str(port)})
+                "TAG_PORT": str(port), "TAG_POP_AUDIENCE": "test-gateway"})
     env.update(extra_env)
     proc = subprocess.Popen([sys.executable, SERVER], env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -70,7 +71,7 @@ def _server(extra_env):
                 time.sleep(0.1)
         else:
             raise RuntimeError("sidecar did not come up")
-        yield base, {"x-agent-cert": leaf_b64, "x-agent-cert-proof": json.dumps(build_assertion(leaf_key, AGENT, audience="test-gateway"))}
+        yield base, {"x-agent-cert": leaf_b64, "x-agent-cert-proof": json.dumps(build_assertion(leaf_key, AGENT, audience=proof_audience))}
     finally:
         proc.terminate()
         proc.wait(timeout=5)
@@ -173,4 +174,37 @@ def test_non_object_signed_payload_cannot_trigger_fail_open(claims):
             "payload": base64.urlsafe_b64encode(json.dumps(claims).encode()).decode(),
             "sig": base64.b64encode(b"invalid").decode(),
         })
+        assert _call(base, headers)[0] == 403
+
+
+@pytest.mark.parametrize("audience", [None, "", "   "])
+def test_enforce_refuses_startup_without_audience(audience):
+    env = dict(os.environ, TAG_MODE="enforce")
+    env.pop("TAG_POP_AUDIENCE", None)
+    if audience is not None:
+        env["TAG_POP_AUDIENCE"] = audience
+    result = subprocess.run([sys.executable, SERVER], env=env,
+                            capture_output=True, text=True, timeout=5)
+    assert result.returncode != 0
+    assert "TAG_POP_AUDIENCE must be non-empty in enforce mode" in result.stderr
+
+
+def test_shadow_still_starts_without_audience():
+    with _server({"TAG_MODE": "shadow", "TAG_POP_AUDIENCE": ""}) as (base, headers):
+        assert _call(base, headers)[0] == 200
+
+
+def test_shadow_warns_about_unbound_audience():
+    env = dict(os.environ, TAG_MODE="shadow")
+    env.pop("TAG_POP_AUDIENCE", None)
+    env.pop("TAG_ANCHORS_PEM", None)
+    result = subprocess.run([sys.executable, SERVER], env=env,
+                            capture_output=True, text=True, timeout=5)
+    assert "WARNING: TAG_POP_AUDIENCE is unset" in result.stderr
+    # Startup continues past the audience check to the separate anchor check.
+    assert "TAG_ANCHORS_PEM must point" in result.stderr
+
+
+def test_enforce_rejects_signed_proof_without_audience():
+    with _server({"TAG_MODE": "enforce", "_proof_audience": None}) as (base, headers):
         assert _call(base, headers)[0] == 403

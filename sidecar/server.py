@@ -28,7 +28,7 @@ Config via env:
   TAG_CERT_HEADER          header carrying b64 PEM leaf  (default x-agent-cert)
   TAG_PROOF_HEADER         header carrying PoP assertion (default x-agent-cert-proof)
   TAG_AGENT_ID_HEADER      claimed agent id (optional)   (default x-agent-id)
-  TAG_POP_AUDIENCE         expected signed PoP audience (optional, operator configured)
+  TAG_POP_AUDIENCE         expected signed PoP audience (required in enforce mode)
   TAG_MIN_SCORE            enforce: require score >= N to allow (default: VERIFIED alone)
 """
 import base64
@@ -54,7 +54,13 @@ if not EXTAUTHZ_PATH.startswith("/") or EXTAUTHZ_PATH == "":
 CERT_HEADER = os.environ.get("TAG_CERT_HEADER", "x-agent-cert").lower()
 PROOF_HEADER = os.environ.get("TAG_PROOF_HEADER", "x-agent-cert-proof").lower()
 AGENT_ID_HEADER = os.environ.get("TAG_AGENT_ID_HEADER", "x-agent-id").lower()
-POP_AUDIENCE = os.environ.get("TAG_POP_AUDIENCE")
+POP_AUDIENCE = os.environ.get("TAG_POP_AUDIENCE", "").strip() or None
+if POP_AUDIENCE is None:
+    if MODE == Mode.ENFORCE:
+        raise SystemExit("TAG_POP_AUDIENCE must be non-empty in enforce mode")
+    print("WARNING: TAG_POP_AUDIENCE is unset; shadow verification does not bind "
+          "proofs to this gateway. Configure a unique audience before enforcing.",
+          file=sys.stderr)
 _min = os.environ.get("TAG_MIN_SCORE")
 MIN_SCORE = int(_min) if _min not in (None, "") else None
 

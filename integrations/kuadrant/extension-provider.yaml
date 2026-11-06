@@ -27,7 +27,6 @@ data:
         - x-agent-cert
         - x-agent-cert-proof
         - x-agent-id
-        - x-agent-cert-audience
         # verdict TAG returns → surfaced to the upstream MCP server (+ logs).
         # in shadow mode TAG always allows, so these ride along on every call.
         headersToUpstreamOnAllow:

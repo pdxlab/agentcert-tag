@@ -5,8 +5,10 @@
 # Shadow-mode by default — run the sidecar with TAG_MODE=shadow and it returns
 # 200/allow on every request, so this blocks NOTHING until you set TAG_MODE=enforce.
 #
+# Agents must sign proofs for this unique TAG_POP_AUDIENCE. Required in enforce mode.
 # Run the sidecar next to agentgateway:
 #   docker run -p 8080:8080 -e TAG_MODE=shadow \
+#     -e TAG_POP_AUDIENCE=https://agentgateway.example.com \
 #     -e TAG_ANCHORS_PEM=/anchors/roots.pem -v $PWD/anchors:/anchors:ro \
 #     ghcr.io/pdxlab/agentcert-tag/sidecar:latest
 #

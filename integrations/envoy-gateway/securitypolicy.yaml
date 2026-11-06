@@ -39,6 +39,9 @@ spec:
         image: ghcr.io/pdxlab/agentcert-tag/sidecar:latest
         env:
         # shadow mode: decide + log, never block. Set to "enforce" to block.
+        # Agents must sign for this unique audience; required in enforce mode.
+        - name: TAG_POP_AUDIENCE
+          value: "https://envoy-gateway.example.com"
         - name: TAG_MODE
           value: "shadow"
         ports:
