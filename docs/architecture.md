@@ -30,8 +30,10 @@ Repo: <https://github.com/pdxlab/agentcert-tag>  ·  Ticket: TRUS-1806
 │   │                                                             │   │
 │   │   Verifier.verify(cert_pem, claimed_agent_id,               │   │
 │   │                   *, carriage, proof, audience)             │   │
-│   │     → VerificationResult {status, agent_id, trust_score,    │   │
-│   │                           source, reason}                   │   │
+│   │     → VerificationResult(verification_status, agent_id,     │   │
+│   │        cert_valid, cert_expiry, trust_score{value, tier,    │   │
+│   │        last_updated, score_age_seconds, source},            │   │
+│   │        attestation, cache_hit, detail)                      │   │
 │   └────┬──────────────────────┬──────────────────┬──────────────┘   │
 │        │                      │                  │                  │
 │   ┌────▼─────────┐    ┌───────▼───────┐   ┌──────▼──────────────┐   │
@@ -44,7 +46,7 @@ Repo: <https://github.com/pdxlab/agentcert-tag>  ·  Ticket: TRUS-1806
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-**One decision contract, three hosts.** The Kong plugin, Envoy sidecar, and SDK client are all thin wrappers that extract (cert, proof, audience) from request headers and ask the verifier core. The *decision* always stays server-side so a Lua or TypeScript re-implementation can't drift from the Python reference.
+**One decision contract.** Every host — the Kong plugin, the Envoy sidecar, the `verify-gate-py` / `verify-gate-ts` SDKs — extracts `(cert, proof, audience)` from a request and asks the Python verifier core for the decision. The decision never leaves the Python core: Kong and the SDKs are HTTP clients to `conf.verify_url` / `TRUSTMODEL_VERIFY_URL`, and the only in-process embedding path is to import `agentcert_tag.Verifier` directly. There is no Lua or TypeScript re-implementation of the decision, so there is nothing to keep in sync.
 
 ---
 
@@ -68,15 +70,21 @@ Repo: <https://github.com/pdxlab/agentcert-tag>  ·  Ticket: TRUS-1806
          ▼
    ┌─────────────────────────┐
    │  (3) expiry             │  not-before / not-after
-   └─────────────────────────┘
+   └─────────────────────────┘  outside window → EXPIRED
          │
          ▼
    ┌─────────────────────────┐  BasicConstraints(ca) +
    │  (4) chain to pinned    │  KeyUsage.keyCertSign on issuers
-   │      trust anchor       │  rejects a CA leaf; sig verified
-   │                         │  against the ISSUER's key, not the
-   │                         │  cert's self-declared algorithm
-   └─────────────────────────┘  (no algorithm confusion)
+   │      trust anchor       │  rejects a CA leaf; signature-
+   │                         │  verification METHOD is picked from
+   │                         │  the issuer's key type (not the cert's
+   │                         │  self-declared one), which closes the
+   │                         │  algorithm-confusion gap.  The hash
+   │                         │  used is the cert's own
+   │                         │  signature_hash_algorithm; EdDSA —
+   │                         │  the TrustModel issuer default
+   │                         │  (Ed25519) — takes no hash.
+   └─────────────────────────┘
          │
          ▼
    ┌─────────────────────────┐  claimed_agent_id present but cert
@@ -98,74 +106,156 @@ Repo: <https://github.com/pdxlab/agentcert-tag>  ·  Ticket: TRUS-1806
    ┌─────────────────────────┐  bounded-staleness cache
    │  (7) revocation         │  DEFAULT_REVOCATION_MAX_STALENESS_S
    │                         │  must be ≤ issuance SLA (TRUS-1813)
-   └─────────────────────────┘  revoked → UNVERIFIED
+   └─────────────────────────┘  revoked → REVOKED
          │
          ▼
    ┌─────────────────────────┐  live backend read is authoritative
-   │  (8) TrustScore         │  (source="live")
-   │      (trust.py)         │  backend unreachable + fail_mode:
-   │                         │     "closed" → ERROR  (NEVER a
-   │                         │     silent VERIFIED)
-   │                         │     "open"   → cert-baked fallback
-   │                         │               source="cert_baked"
-   └─────────────────────────┘           (frozen at issuance)
+   │  (8) TrustScore         │  (trust_score.source="live")
+   │      (trust.py)         │
+   └─────────────────────────┘
          │
          ▼
-   VerificationResult {
-     status: VERIFIED | UNVERIFIED | ERROR,
-     agent_id, trust_score, source, reason
-   }
+   ┌─────────────────────────┐  fires only if (7) OR (8) needed a
+   │  (9) fail policy        │  backend that was unreachable AND no
+   │                         │  fresh cache was available for it:
+   │                         │   fail_mode="closed" → ERROR
+   │                         │       detail="backend unreachable
+   │                         │       and no fresh cache (fail-closed)"
+   │                         │   fail_mode="open"   → VERIFIED
+   │                         │       detail="ok (fail-open, stale
+   │                         │       backend)"; trust_score.source
+   │                         │       falls back to "cert_baked" when
+   │                         │       the score was the unknown.
+   │                         │
+   │                         │  NB: fail-open covers UNKNOWN revocation
+   │                         │  state, not just unknown score — so a
+   │                         │  revoked cert verifies while the
+   │                         │  revocation source is unreachable.
+   │                         │  That is the main reason to choose
+   │                         │  closed for regulated deployments.
+   └─────────────────────────┘
+         │
+         ▼
+   VerificationResult(
+     verification_status: VERIFIED | UNVERIFIED | REVOKED | EXPIRED | ERROR,
+     agent_id,
+     cert_valid: bool,
+     cert_expiry: Optional[str],
+     trust_score: {value, tier, last_updated, score_age_seconds, source},
+     attestation: {signed_by, signature, verified_at},
+     cache_hit: bool,
+     detail: Optional[str]
+   )
 ```
 
-**Invariant:** `verify()` **never raises** — a parse error or any failed step resolves to `UNVERIFIED` / `ERROR`. That lets a gateway/sidecar wrap a call-site in a single boolean without `try/except`.
+**Invariant:** `verify()` **never raises** — a parse error or any failed step resolves to a terminal `verification_status` (`UNVERIFIED` for most logic failures, `EXPIRED` for step 3, `REVOKED` for step 7, `ERROR` for infrastructure failures under fail-closed). That lets a gateway/sidecar wrap a call-site in a single boolean (`result.ok()`) without `try/except`.
 
 ---
 
-## 3. Deployment topologies — three ways to embed TAG
+## 3. Deployment topologies — two ways to reach the verifier
 
-### (A) Kong plugin
+TAG runs the verifier core in a Python process. Every topology either embeds that process in-line (3C) or reaches it over HTTP (3A, 3B).
+
+### (A) Kong plugin — HTTP client
 
 ```
    Client ─▶ Kong proxy ─[verify-tag plugin]──▶   Upstream service
-                 │        allow / deny
-                 ▼
-              core verifier (Lua that mirrors
-              the Python decision)
+                 │                                (block / log based on
+                 │                                 config.block_on list)
+                 ▼  HTTP POST conf.verify_url
+              TAG sidecar (Python core verifier)
 ```
 
-### (B) Envoy ext_authz sidecar
+`kong/agentcert-tag/handler.lua` calls `conf.verify_url` over HTTP via
+`resty.http` (250 ms NFR-1 budget per cache-miss). It then reads the
+decision out of the JSON response and writes it to
+`kong.ctx.shared.trustscore` / `kong.ctx.shared.agentcert` so Kong's own
+policy rules can act on it. The plugin itself only blocks in ENFORCE
+mode when the verdict is on the operator-supplied `config.block_on`
+list (FR-14: the plugin never unilaterally decides allow/deny).
+
+The plugin has its own fail-open / fail-closed behavior when the verify
+URL itself is unreachable, independent of the verifier's `fail_mode` —
+controlled by `config.fail_mode_on_verify_unreachable`. Default is
+fail-open with a log line, because the plugin is the host policy
+engine's input, not its decision point.
+
+### (B) Envoy ext_authz sidecar — HTTP
 
 ```
    Client ─▶ Envoy / agentgateway / Kuadrant
+                   │  ext_authz HTTP check
+                   ▼  POST /ext_authz
+                TAG sidecar (ThreadingHTTPServer,
+                  Python core verifier)
                    │
-                   │ ext_authz gRPC/HTTP
-                   ▼
-                sidecar process (Python core verifier)
-                   │
-                   ▼  OK / DENIED
+                   ▼  OK / DENIED (ext_authz semantics)
                Envoy forwards or rejects
                    ▼
                 Upstream service
 ```
 
-### (C) In-process SDK
+`sidecar/server.py` runs a `ThreadingHTTPServer` and exposes two HTTP
+endpoints: `POST /verify` (JSON request/response, used by Kong and the
+SDKs) and `/ext_authz` (ext_authz HTTP-check semantics, used by Envoy
+and compatible proxies). It does **not** speak ext_authz gRPC — ext_authz
+in TAG is HTTP throughout.
 
-```
-     ┌───── Application process ─────┐
-     │                               │
-     │   handler(req):               │
-     │     result = tag.verify(      │
-     │         cert, proof, audience │
-     │     )                         │
-     │     if not result.ok: 401     │
-     │     else: business_logic()    │
-     │                               │
-     │  (packages/verify-gate-*: thin│
-     │   wrappers around the core)   │
-     └───────────────────────────────┘
+### (C) In-process embedding
+
+The only way to run TAG in-process (no HTTP hop) is to import the
+verifier core directly:
+
+```python
+from agentcert_tag import Verifier, Mode, FailMode
+
+verifier = Verifier(
+    trust_anchor_pem=…,     # pinned issuer bundle
+    mode=Mode.SHADOW,       # decide + log; never influence enforcement
+    fail_mode=FailMode.CLOSED,
+)
+
+def handler(req):
+    result = verifier.verify(
+        cert_pem=req.client_cert_pem,
+        carriage="mtls",
+        audience="svc-api.example",
+    )
+    # result.verification_status ∈ {VERIFIED, UNVERIFIED, REVOKED,
+    #                               EXPIRED, ERROR}
+    # In SHADOW mode you record the result and emit upstream signals,
+    # but the application's own policy engine decides what to do.
+    emit_signal(result)
+    return business_logic(req)
 ```
 
-**Key design insight:** all three topologies call *the same decision function*, so a policy change (for example, tightening the PoP freshness window) applies uniformly whether the enforcement point is a Kong plugin, an Envoy sidecar, or an in-process check. The reference implementation is Python (`verify.py`); the Lua plugin and any TS re-implementation must produce the same `VerificationResult` — this is called out as a convention in `.argus/memory/conventions.md`.
+`packages/verify-gate-py/trustmodel_agentcert_tag/` and
+`packages/verify-gate-ts/src/` are **not** in-process embeddings — they
+are thin HTTP clients that call a TAG sidecar's `/verify` endpoint
+(default `http://localhost:8080/verify`, overridable via
+`TRUSTMODEL_VERIFY_URL`). They belong under topology B; use them when
+you want the same JSON decision contract the Kong plugin uses without
+writing the HTTP call yourself.
+
+---
+
+### Mode: SHADOW is the default install posture
+
+All three topologies run through `Mode.SHADOW` by default. In SHADOW
+the verifier *decides* and *logs*, but it never influences enforcement
+— the host application / Kong plugin / Envoy policy chain still has
+the final say. TAG is a signal source, not an enforcement point (FR-14):
+even in `Mode.ENFORCE`, the *actionable* decision comes from the host
+policy engine acting on `verification_status` + `trust_score.tier` +
+`cert_valid`. The sidecar's `/ext_authz` endpoint returns an ext_authz
+verdict because Envoy requires one, but the verdict is derived from the
+same `VerificationResult` the SHADOW path records; nothing in TAG makes
+a host-specific allow/deny choice of its own.
+
+A production rollout therefore looks like: start in SHADOW, read the
+emitted signals through the existing observability stack until the
+traffic pattern is understood, then flip to ENFORCE on the surfaces
+where the host policy engine has an explicit `block_on` rule.
 
 ---
 
@@ -186,6 +276,6 @@ TAG is the **verifier** side only. The following live in other repos:
 1. **Header carriage without a valid `proof` → `UNVERIFIED`.** Never verify a bare public cert off mTLS. (TRUS-1824 was the original replay hole.)
 2. **Revocation freshness must stay ≤ the issuance revocation-propagation SLA** (TRUS-1813), or a revoked cert verifies during the gap.
 3. **`fail_mode="closed"`** turns an unreachable backend into `ERROR`, never a silent `VERIFIED`.
-4. **Signature verification keys off the trusted issuer's key**, never the cert's self-declared algorithm (no algorithm confusion). RSA pinned to a concrete padding.
+4. **Signature verification method is dispatched from the issuer's key type** (EC, RSA, Ed25519/Ed448), never from the cert's self-declared `signatureAlgorithm`. That closes the classic algorithm-confusion gap; the cert still supplies its own `signature_hash_algorithm` (consumed for EC and RSA; EdDSA — the TrustModel default — takes no hash). RSA is pinned to PKCS1v15.
 5. **TrustScore provenance** — a live backend read is authoritative; the cert-baked fallback is frozen at issuance. Tag it `source="cert_baked"` and never present it as live.
 6. **The verifier is a trust boundary.** A logic gap in `verify.py` is an auth bypass; review it adversarially as an authn/authz change.
