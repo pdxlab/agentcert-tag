@@ -148,7 +148,7 @@ Repo: <https://github.com/pdxlab/agentcert-tag>  ·  Ticket: TRUS-1806
    )
 ```
 
-**Invariant:** `verify()` **never raises** — a parse error or any failed step resolves to a terminal `verification_status` (`UNVERIFIED` for most logic failures, `EXPIRED` for step 3, `REVOKED` for step 7, `ERROR` for infrastructure failures under fail-closed). That lets a gateway/sidecar wrap a call-site in a single boolean (`result.ok()`) without `try/except`.
+**Invariant:** `verify()` **never raises** — a parse error or any failed step resolves to a terminal `verification_status` (`UNVERIFIED` for most logic failures, `EXPIRED` for step 3, `REVOKED` for step 7, `ERROR` for infrastructure failures under fail-closed). That lets a gateway/sidecar branch on `result.verification_status` without `try/except`. `VerificationResult.allowed_by_default` is a convenience property that returns `True` iff status is `VERIFIED`; it's a hint the host policy engine may ignore, not a built-in allow/deny decision (FR-14).
 
 ---
 
@@ -175,10 +175,14 @@ mode when the verdict is on the operator-supplied `config.block_on`
 list (FR-14: the plugin never unilaterally decides allow/deny).
 
 The plugin has its own fail-open / fail-closed behavior when the verify
-URL itself is unreachable, independent of the verifier's `fail_mode` —
-controlled by `config.fail_mode_on_verify_unreachable`. Default is
-fail-open with a log line, because the plugin is the host policy
-engine's input, not its decision point.
+URL itself is unreachable, independent of the verifier core's
+`fail_mode` (which governs the core's own backend lookups to the
+transparency log and reputation API). Kong's own behavior is controlled
+by `config.fail_mode` (`"open"` or `"closed"`, default `"closed"` —
+`kong/agentcert-tag/schema.lua` ships "closed for regulated env"). An
+unreachable verifier therefore becomes an operator-visible failure by
+default rather than a silent pass; set it to `"open"` only if the host
+has its own primary gate and you want availability over provenance.
 
 ### (B) Envoy ext_authz sidecar — HTTP
 
@@ -207,11 +211,16 @@ The only way to run TAG in-process (no HTTP hop) is to import the
 verifier core directly:
 
 ```python
-from agentcert_tag import Verifier, Mode, FailMode
+from agentcert_tag import Verifier, Mode, FailMode, InMemoryTrustSource
+
+# A TrustSource supplies trust anchors + reputation + revocation lookups.
+# Use InMemoryTrustSource for tests/fixtures; HttpTrustSource against a
+# real aurora-gateway deployment.
+trust_source = InMemoryTrustSource(anchors_pem=[…])  # pinned issuer bundle
 
 verifier = Verifier(
-    trust_anchor_pem=…,     # pinned issuer bundle
-    mode=Mode.SHADOW,       # decide + log; never influence enforcement
+    trust_source,
+    mode=Mode.SHADOW,        # decide + log; never influence enforcement
     fail_mode=FailMode.CLOSED,
 )
 
