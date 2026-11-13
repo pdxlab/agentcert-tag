@@ -46,7 +46,7 @@ Repo: <https://github.com/pdxlab/agentcert-tag>  ·  Ticket: TRUS-1806
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-**One decision contract.** Every host — the Kong plugin, the Envoy sidecar, the `verify-gate-py` / `verify-gate-ts` SDKs — extracts `(cert, proof, audience)` from a request and asks the Python verifier core for the decision. The decision never leaves the Python core: Kong and the SDKs are HTTP clients to `conf.verify_url` / `TRUSTMODEL_VERIFY_URL`, and the only in-process embedding path is to import `agentcert_tag.Verifier` directly. There is no Lua or TypeScript re-implementation of the decision, so there is nothing to keep in sync.
+**One decision contract.** Every host — the Kong plugin, the Envoy sidecar, the `verify-gate-py` / `verify-gate-ts` SDKs — extracts `(cert, proof, audience)` from a request and asks the Python verifier core for the decision. The decision never leaves the Python core: Kong and the SDKs are HTTP clients to `conf.verify_url` / `TRUSTMODEL_VERIFY_URL`, and the only in-process embedding path is to import `agentcert_tag.Verifier` directly. There is no Lua or TypeScript re-implementation of the decision *algorithm*, so the language-agnostic-parity rule in `.argus/memory/conventions.md` is satisfied on the algorithm axis by construction. What still has to track `verify.py` is the **wire contract**: the `VerificationResult` JSON schema returned by `/verify`, `spec/verification-core.md`, and the Kong plugin's `schema.lua` config shape. Any response-schema change to `verify()` must land in all three; the Kong plugin and SDKs will deserialize the new shape but won't tell you if a field semantics drifted.
 
 ---
 
