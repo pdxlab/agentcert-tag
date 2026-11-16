@@ -46,8 +46,17 @@ class Carriage:
 
 
 class FailMode:
-    OPEN = "open"      # backend unreachable -> UNVERIFIED but cert_valid preserved, host may allow
-    CLOSED = "closed"  # backend unreachable -> ERROR, host should deny (default for regulated)
+    # Backend unreachable AND no fresh cache for a step that needed it
+    # (revocation or trust score):
+    OPEN = "open"      # -> VERIFIED, detail="ok (fail-open, stale backend)";
+                       #    trust_score.source falls back to "cert_baked" when the
+                       #    score was the unknown. Note: this covers an UNKNOWN
+                       #    revocation state, not just an unknown score, so a
+                       #    revoked cert verifies while the revocation source is
+                       #    unreachable. Host may allow on the VERIFIED verdict.
+    CLOSED = "closed"  # -> ERROR, detail="backend unreachable and no fresh cache
+                       #    (fail-closed)". Default for regulated deployments
+                       #    because of the fail-open revocation gap above.
 
 
 class Mode:
